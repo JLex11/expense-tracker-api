@@ -1,39 +1,38 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "expense-tracker-api",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-03-19",
-  // "compatibility_flags": [
-  //   "nodejs_compat"
-  // ],
-  "vars": {
-    "JWT_SECRET": "your-super-secret-key-change-it"
-  },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
-  // "r2_buckets": [
-  //   {
-  //     "binding": "MY_BUCKET",
-  //     "bucket_name": "my-bucket"
-  //   }
-  // ],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "expense-tracker-db",
-      "database_id": "expense-tracker-db",
-      "migrations_dir": "drizzle"
-    }
-  ],
-  // "ai": {
-  //   "binding": "AI"
-  // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
-  // }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "expense-tracker-api",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-19",
+	// "compatibility_flags": [
+	//   "nodejs_compat"
+	// ],
+	"vars": {
+	},
+	// "kv_namespaces": [
+	//   {
+	//     "binding": "MY_KV_NAMESPACE",
+	//     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	//   }
+	// ],
+	// "r2_buckets": [
+	//   {
+	//     "binding": "MY_BUCKET",
+	//     "bucket_name": "my-bucket"
+	//   }
+	// ],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "expense-tracker-db",
+			"database_id": "ec51241a-65f8-4e16-be1a-1e8aaf823d78",
+			"migrations_dir": "drizzle"
+		}
+	],
+	// "ai": {
+	//   "binding": "AI"
+	// },
+	// "observability": {
+	//   "enabled": true,
+	//   "head_sampling_rate": 1
+	// }
 }
