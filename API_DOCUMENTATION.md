@@ -1,49 +1,116 @@
 # Expense Tracker API Documentation
 
-Esta API proporciona una base sólida para el seguimiento de gastos con soporte para sincronización bidireccional "Delta Sync", permitiendo que las aplicaciones móviles funcionen sin conexión y sincronicen cambios de manera eficiente.
+Esta API está orientada a sincronización incremental para clientes móviles/web y corre sobre Cloudflare Workers + D1. El backend implementa autenticación JWT, validación estricta con Zod, borrado lógico y generación automática de gastos recurrentes.
 
-## 🚀 Arquitectura: "Delta Sync" con WatermelonDB
+## Arquitectura de Sync
 
-El backend está diseñado para conectarse nativamente con **WatermelonDB**. Recibe todas las actualizaciones agrupadas por tablas (`created`, `updated`, `deleted`) y usa un enfoque Last Write Wins basado en marcas de tiempo (`timestamps`).
+La API usa un modelo estilo WatermelonDB:
 
-### Requisitos del Esquema
-Todas las tablas (incluidas las nuevas y `recurring_expense_rules`) cumplen con:
-- `id`: String UUID generado por WatermelonDB en el frontend.
-- `created_at` y `updated_at`: Timestamps en formato numérico milisegundos.
-- `deleted_at`: Usado internamente por el servidor para manejar borrados lógicos y notificar a otros dispositivos (Pull) qué registros han sido eliminados de su BD local en un push.
+- `GET /api/sync`: pull de cambios desde el servidor.
+- `POST /api/sync`: push de cambios desde el cliente.
+- Todas las colecciones se transmiten por tabla con los grupos `created`, `updated` y `deleted`.
 
----
+Colecciones soportadas:
 
-## 🔐 Autenticación y Validación
+- `categories`
+- `expenses`
+- `budgets`
+- `recurring_expense_rules`
 
-Todas las rutas bajo `/api/*` (excepto `/api/auth/*`) requieren un token Bearer JWT. 
-La API utiliza **Zod** para validación estricta de esquemas en todas las entradas.
+### Reglas de Datos
 
-### Registro
-`POST /api/auth/register`
-- **Body**: `{"email": "...", "password": "..."}`
-  - `email`: Debe ser un formato de correo válido.
-  - `password`: Mínimo 8 caracteres.
-- **Respuesta (`201 Created`)**: `{"token": "...", "user": {"id": "...", "email": "..."}}`
+Todas las tablas sincronizables usan:
 
-### Login
-`POST /api/auth/login`
-- **Body**: `{"email": "...", "password": "..."}`
-- **Respuesta (`200 OK`)**: Token JWT y datos del usuario.
+- `id`: string UUID generado en cliente
+- `createdAt`: timestamp numérico en milisegundos
+- `updatedAt`: timestamp numérico en milisegundos
+- `deletedAt`: timestamp numérico o `null` para borrado lógico
 
----
+## Autenticación
 
-## 🔄 Sincronización (API de WatermelonDB)
+Todas las rutas bajo `/api/*`, excepto `/api/auth/*`, requieren:
 
-Este es el mecanismo nativo mediante el cual WatermelonDB descarga e inserta registros.
-El protocolo se divide en dos métodos en el mismo endpoint `/api/sync`: `GET` para bajar datos (Pull) y `POST` para subir cambios (Push).
-Las actualizaciones entrantes usan `updatedAt` para aplicar un criterio Last Write Wins. Los borrados se aplican solo si el servidor no recibió cambios más nuevos desde `last_pulled_at`.
+```http
+Authorization: Bearer <jwt>
+```
 
-### Pull (GET)
-El cliente llama a este endpoint proporcionando la última vez que sincronizó.
-`GET /api/sync?last_pulled_at=1710845600000`
-- **Param**: `last_pulled_at` en formato timestamp.
-- **Respuesta**: Un objeto separando registros creados, modificados o "eliminados lógicamente" (devuelve el string UUID).
+La autenticación se ejecuta antes de la validación específica del endpoint. Por eso, una request sin token a `/api/sync` responde `401` antes de validar `last_pulled_at`.
+
+### POST /api/auth/register
+
+Body:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+Validación:
+
+- `email` debe ser válido
+- `password` debe tener mínimo 8 caracteres
+
+Respuesta `201`:
+
+```json
+{
+  "token": "jwt",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com"
+  }
+}
+```
+
+### POST /api/auth/login
+
+Body:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+Respuesta `200`:
+
+```json
+{
+  "token": "jwt",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com"
+  }
+}
+```
+
+Notas:
+
+- Usuarios con `deletedAt != null` no pueden autenticarse.
+
+## Sync
+
+## GET /api/sync
+
+Ejemplo:
+
+```http
+GET /api/sync?last_pulled_at=1710845600000
+```
+
+Parámetros:
+
+- `last_pulled_at`: timestamp en milisegundos
+
+Validación:
+
+- Si el request está autenticado pero `last_pulled_at` no es numérico, responde `400`
+
+Respuesta `200`:
+
 ```json
 {
   "changes": {
@@ -52,14 +119,20 @@ El cliente llama a este endpoint proporcionando la última vez que sincronizó.
     "budgets": { "created": [], "updated": [], "deleted": [] },
     "recurring_expense_rules": { "created": [], "updated": [], "deleted": [] }
   },
-  "timestamp": 1710850000000 
+  "timestamp": 1710850000000
 }
 ```
 
-### Push (POST)
-Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con todas sus colecciones. Validado mediante esquemas de Zod para asegurar la integridad de la sincronización.
-`POST /api/sync`
-- **Body**:
+Semántica:
+
+- registros con `createdAt > last_pulled_at` salen en `created`
+- registros con `updatedAt > last_pulled_at` y no creados recientemente salen en `updated`
+- registros con `deletedAt != null` salen en `deleted` como lista de ids
+
+## POST /api/sync
+
+Body base:
+
 ```json
 {
   "last_pulled_at": 1710845600000,
@@ -71,37 +144,86 @@ Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con 
   }
 }
 ```
-- **Respuesta (`200 OK`)**: Todo ha ido bien, aplicar cambios localmente. 
-- **Validaciones de Negocio**: 
-  - No se permiten importes de gastos (`expenses.amount`) negativos.
 
----
+Respuesta `200`:
 
-## ⏰ Automatización: Gastos Recurrentes
+- body vacío
 
-La API incluye un procesador de tareas programadas (**Cloudflare Cron Trigger**) que se ejecuta cada hora.
-- **Funcionamiento**: Escanea la tabla `recurring_expense_rules` en busca de reglas activas donde `nextDueAt` haya pasado.
-- **Acción**: Crea automáticamente un nuevo registro en `expenses` y actualiza `nextDueAt` según el intervalo definido (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`). También acepta los valores legacy `DAY`, `WEEK`, `MONTH`, `YEAR`.
+Validación:
 
----
+- el payload es estricto por colección
+- no se aceptan campos extra
+- `expenses.amount` no puede ser negativo
+- `recurring_expense_rules.intervalUnit` acepta:
+  - documentados: `DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`
+  - legacy: `DAY`, `WEEK`, `MONTH`, `YEAR`
 
-## 📁 Endpoints de Mantenimiento
+Reglas de conflicto:
 
-### Listar Gastos
-`GET /api/expenses`
-- Devuelve los últimos 50 gastos del usuario.
+- updates solo se aplican si el `updatedAt` entrante es más nuevo que el almacenado
+- deletes solo se aplican si el servidor no tiene un cambio más reciente que `last_pulled_at`
+- un usuario no puede modificar ni borrar registros de otro usuario aunque conozca el `id`
 
-### Perfil de Usuario
-`GET /api/profile`
-- Devuelve los datos del usuario autenticado (sin contraseñas).
+## Endpoints de Lectura
 
----
+### GET /api/profile
 
-## 🛠️ Tecnologías Utilizadas
+Devuelve el usuario autenticado sin password.
 
-- **Runtime**: [Bun](https://bun.sh)
-- **Framework**: [Hono](https://hono.dev)
-- **Base de Datos**: [Cloudflare D1](https://developers.cloudflare.com/d1/)
-- **ORM**: [Drizzle ORM](https://orm.drizzle.team)
-- **Validación**: [Zod](https://zod.dev)
-- **Seguridad**: JWT con `hono/jwt`, `bcryptjs` y CORS configurable mediante `CORS_ORIGIN`.
+Respuesta `200`:
+
+```json
+{
+  "id": "uuid",
+  "email": "user@example.com",
+  "updatedAt": "2026-04-05T02:11:54.000Z"
+}
+```
+
+Notas:
+
+- usuarios soft-deleted no aparecen
+
+### GET /api/expenses
+
+Devuelve hasta 50 gastos del usuario autenticado, ordenados por fecha descendente.
+
+Notas:
+
+- excluye gastos con `deletedAt != null`
+
+## Automatización de Gastos Recurrentes
+
+El Worker ejecuta `scheduled()` cada hora.
+
+Comportamiento:
+
+- busca reglas activas cuyo `nextDueAt <= now`
+- crea un gasto con `origin = "RECURRING_RULE"` y `status = "PENDING"`
+- avanza `nextDueAt` según el intervalo
+- si la regla trae una unidad inválida, la desactiva
+- evita duplicar la misma ocurrencia mediante lookup e índice único
+
+## Configuración Operativa
+
+Secretos/variables relevantes:
+
+- `JWT_SECRET`: requerido
+- `CORS_ORIGIN`: opcional, lista separada por comas
+
+Si `CORS_ORIGIN` no está configurado, el Worker responde con `Access-Control-Allow-Origin: *`.
+
+## Testing
+
+La base actual de testing tiene:
+
+- smoke tests con mocks de D1
+- tests de reglas puras
+- integración real con Worker local + D1 migrada
+
+Comandos:
+
+```bash
+bun test
+bun run typecheck
+```

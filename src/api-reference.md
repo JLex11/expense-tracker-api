@@ -1,30 +1,66 @@
 # Expense Tracker API Reference
 
-## 1. Authentication
-All routes under `/api/*` require a Bearer token in the `Authorization` header.
-The API uses **Zod** for validation.
+Short developer reference for the current Worker behavior.
 
-- `POST /api/auth/register`: Create a user account (`201 Created`).
-  - **Schema**: Email format, Password min 8 chars.
-- `POST /api/auth/login`: Authenticate and receive a JWT.
+## Authentication
 
-## 2. Synchronization (WatermelonDB)
-- `GET /api/sync?last_pulled_at=<timestamp>`: Pull changes from the server.
-- `POST /api/sync`: Push local changes (created, updated, deleted) to the server.
-  - **Validation**: Enforces structured payloads and non-negative amounts for expenses.
-  - **Conflict policy**: Incoming updates use `updatedAt` for last-write-wins. Deletes are ignored when the server already has newer changes than `last_pulled_at`.
+- `POST /api/auth/register`
+  - validates email + password
+  - returns `201` with JWT and user
+- `POST /api/auth/login`
+  - returns `200` with JWT and user
+- all `/api/*` routes except `/api/auth/*` require `Authorization: Bearer <token>`
+- auth runs before endpoint-specific validation
 
-## 3. Automation
-- **Scheduled Task**: Processes `recurring_expense_rules` every hour.
-- **Rules**: Supports `DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY` intervals and legacy `DAY`, `WEEK`, `MONTH`, `YEAR`.
+## Sync
 
-## 4. Resources
-- `GET /api/expenses`: List the latest 50 expenses.
-- `GET /api/profile`: Get authenticated user profile.
+- `GET /api/sync?last_pulled_at=<timestamp>`
+  - returns `changes` + `timestamp`
+  - if authenticated and query is invalid, returns `400`
+- `POST /api/sync`
+  - strict payload per collection
+  - blocks record takeover by `id`
+  - uses `updatedAt` as last-write-wins
+  - ignores stale deletes when server already has newer data
+  - rejects negative `expenses.amount`
 
-## 5. Data Models
-- **Users**: `id`, `email`, `password`, `updatedAt`, `deletedAt`.
-- **Categories**: `id`, `userId`, `name`, `icon`, `createdAt`, `updatedAt`, `deletedAt`.
-- **Expenses**: `id`, `userId`, `amount`, `categoryId`, `date`, `note`, `paymentMethod`, `status`, `origin`, `recurringRuleId`, `resolvedAt`, `createdAt`, `updatedAt`, `deletedAt`.
-- **RecurringExpenseRules**: `id`, `userId`, `amount`, `categoryId`, `paymentMethod`, `note`, `intervalValue`, `intervalUnit`, `startDate`, `nextDueAt`, `isActive`, `createdAt`, `updatedAt`, `deletedAt`.
-- **Budgets**: `id`, `userId`, `categoryId`, `monthKey`, `limitAmount`, `createdAt`, `updatedAt`, `deletedAt`.
+## Collections
+
+- `categories`
+- `expenses`
+- `budgets`
+- `recurring_expense_rules`
+
+Common sync fields:
+
+- `id`
+- `createdAt`
+- `updatedAt`
+- `deletedAt`
+
+## Cron
+
+- recurring rules run hourly through Worker `scheduled()`
+- supports `DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`
+- also accepts legacy aliases `DAY`, `WEEK`, `MONTH`, `YEAR`
+- invalid recurring units disable the rule
+- duplicate recurring occurrences are prevented
+
+## Read Endpoints
+
+- `GET /api/profile`
+  - authenticated user without password
+  - excludes soft-deleted users
+- `GET /api/expenses`
+  - latest 50 expenses
+  - excludes soft-deleted records
+
+## Runtime Config
+
+- `JWT_SECRET`: required
+- `CORS_ORIGIN`: optional comma-separated allowlist
+
+## Testing
+
+- `bun test` runs mocks + real local D1 integration
+- `bun run typecheck` validates TypeScript

@@ -1,82 +1,119 @@
 # Expense Tracker API
 
-A robust backend service for personal expense management, built on **Cloudflare Workers** and **Drizzle ORM**. This API is designed to support efficient data synchronization (Delta Sync) for mobile and web clients.
+Backend for personal expense tracking, built on **Cloudflare Workers**, **D1** and **Drizzle ORM**. The API is designed around **WatermelonDB-style delta sync**, JWT auth and recurring expense generation via cron.
 
-## 🚀 Features
+## Features
 
-- **Authentication & Validation:** Secure user registration and login with JWT and Zod validation (Strict email and password requirements).
-- **Data Synchronization:** Efficient bi-directional sync (delta updates) based on WatermelonDB's protocol.
-- **Automated Recurring Expenses:** Hourly Cron Trigger to process and generate expenses from recurring rules.
-- **CORS Support:** Integrated middleware to facilitate cross-origin requests from frontend applications.
-- **Performance:** Built on Cloudflare Workers and D1 for low latency and high availability.
+- JWT-based authentication with strict Zod validation for register/login.
+- Delta sync endpoint with per-collection payload validation.
+- Conflict handling based on `updatedAt` last-write-wins semantics.
+- Soft deletes propagated through `pull`.
+- Hourly cron job for recurring expenses.
+- Configurable CORS through `CORS_ORIGIN`.
+- Test suite with both fast mocked tests and real local D1 integration tests.
 
-## 🛠 Tech Stack
+## Stack
 
-- **Framework:** [Hono](https://hono.dev)
-- **Database:** [Cloudflare D1](https://developers.cloudflare.com/d1/)
-- **ORM:** [Drizzle ORM](https://orm.drizzle.team)
-- **Validation:** [Zod](https://zod.dev)
-- **Runtime:** [Bun](https://bun.sh) (for development and testing)
-- **Auth:** JWT / bcryptjs
+- Framework: [Hono](https://hono.dev)
+- Runtime: [Cloudflare Workers](https://developers.cloudflare.com/workers/) and [Bun](https://bun.sh/)
+- Database: [Cloudflare D1](https://developers.cloudflare.com/d1/)
+- ORM: [Drizzle ORM](https://orm.drizzle.team)
+- Validation: [Zod](https://zod.dev)
+- Auth: `hono/jwt` + `bcryptjs`
 
-## 📦 Getting Started
+## Local Setup
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) installed
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/get-started/) installed and authenticated
+- [Bun](https://bun.sh/)
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/get-started/)
 
-### Installation
+### Install
 
-1. Clone the repository and install dependencies:
-   ```bash
-   bun install
-   ```
-
-2. Create local worker vars:
-   ```bash
-   cp .dev.vars.example .dev.vars
-   ```
-
-3. Run the development server:
-   ```bash
-   bun run dev
-   ```
-
-### Database Management
-
-Apply migrations to your local D1 instance:
 ```bash
-bunx wrangler d1 migrations apply DB --local
+bun install
+cp .dev.vars.example .dev.vars
 ```
 
-Deploying migrations to production:
+`.dev.vars` must contain at least:
+
 ```bash
-bunx wrangler d1 migrations apply DB --remote
+JWT_SECRET=change-me-in-local-dev
 ```
 
-Set production secrets before deploying:
+Optional:
+
+- `CORS_ORIGIN`: comma-separated allowlist such as `http://localhost:3000,http://localhost:5173`
+
+### Run the Worker
+
+```bash
+bun run dev
+```
+
+### Apply Migrations
+
+Local D1:
+
+```bash
+bun run db:migrate:local
+```
+
+Remote D1:
+
+```bash
+bun run db:migrate:prod
+```
+
+## Production Configuration
+
+Before deploying or testing protected routes in production, configure at least:
+
 ```bash
 wrangler secret put JWT_SECRET
 ```
 
 Optional runtime variable:
-- `CORS_ORIGIN`: lista separada por comas con orígenes permitidos.
 
-## 🧪 Testing
+- `CORS_ORIGIN`: comma-separated allowlist for browser clients. If omitted, the Worker falls back to `*`.
 
-The project includes a fast test suite using `bun test`, plus `bun run typecheck` for static validation.
+## Testing
 
-Run all tests:
+The project currently has two test layers:
+
+- Fast tests using lightweight D1 mocks for route and business-rule coverage.
+- Integration tests using a real migrated local D1 database and a locally started Worker.
+
+Run everything:
+
 ```bash
 bun test
 ```
 
-Run typecheck:
+Run static type checks:
+
 ```bash
 bun run typecheck
 ```
 
-## 🔑 API Documentation
+## Current API Surface
 
-See `API_DOCUMENTATION.md` for a detailed breakdown of endpoints, request schemas, and business rules.
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/profile`
+- `GET /api/expenses`
+- `GET /api/sync`
+- `POST /api/sync`
+- scheduled cron via Worker `scheduled()`
+
+## Notes
+
+- Protected routes authenticate before request-specific validation, so unauthenticated requests to `/api/sync` return `401` before query validation runs.
+- `GET /api/expenses` excludes soft-deleted expenses.
+- `GET /api/profile` excludes soft-deleted users.
+- Recurring rules accept both documented interval values (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`) and legacy aliases (`DAY`, `WEEK`, `MONTH`, `YEAR`).
+
+## Documentation
+
+- Detailed API behavior: `API_DOCUMENTATION.md`
+- Short developer reference: `src/api-reference.md`

@@ -476,6 +476,23 @@ describe('Expense Tracker API', () => {
     expect(response.status).toBe(401);
   });
 
+  test('GET /api/profile requires a token', async () => {
+    const response = await app.request('/api/profile', {}, MOCK_ENV);
+    expect(response.status).toBe(401);
+  });
+
+  test('GET /api/profile rejects an invalid token', async () => {
+    const response = await app.request(
+      '/api/profile',
+      {
+        headers: { Authorization: 'Bearer invalid-token' },
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   test('GET /api/profile returns the authenticated user', async () => {
     const { token } = await registerAndLogin(`profile-${Date.now()}@example.com`);
 
@@ -544,6 +561,23 @@ describe('Expense Tracker API', () => {
     expect(payload[0].id).toBe('expense-active');
   });
 
+  test('GET /api/sync requires a token', async () => {
+    const response = await app.request('/api/sync?last_pulled_at=0', {}, MOCK_ENV);
+    expect(response.status).toBe(401);
+  });
+
+  test('GET /api/sync rejects an invalid token', async () => {
+    const response = await app.request(
+      '/api/sync?last_pulled_at=0',
+      {
+        headers: { Authorization: 'Bearer invalid-token' },
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   test('GET /api/sync validates last_pulled_at', async () => {
     const { token } = await registerAndLogin(`sync-${Date.now()}@example.com`);
 
@@ -560,6 +594,8 @@ describe('Expense Tracker API', () => {
 
   test('POST /api/sync accepts a valid expense payload', async () => {
     const { token } = await registerAndLogin(`push-${Date.now()}@example.com`);
+    const expenseId = crypto.randomUUID();
+    const expenseCreatedAt = Date.now();
 
     const response = await app.request(
       '/api/sync',
@@ -571,18 +607,18 @@ describe('Expense Tracker API', () => {
             expenses: {
               created: [
                 {
-                  id: crypto.randomUUID(),
+                  id: expenseId,
                   amount: 100,
                   categoryId: 'category-1',
-                  date: Date.now(),
+                  date: expenseCreatedAt,
                   note: null,
                   paymentMethod: 'CARD',
                   status: 'PAID',
                   origin: 'MANUAL',
                   recurringRuleId: null,
                   resolvedAt: null,
-                  createdAt: Date.now(),
-                  updatedAt: Date.now(),
+                  createdAt: expenseCreatedAt,
+                  updatedAt: expenseCreatedAt,
                 },
               ],
               updated: [],
@@ -600,6 +636,19 @@ describe('Expense Tracker API', () => {
 
     expect(response.status).toBe(200);
     expect(dbState.expenses).toHaveLength(1);
+
+    const pullResponse = await app.request(
+      '/api/sync?last_pulled_at=0',
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      MOCK_ENV,
+    );
+
+    expect(pullResponse.status).toBe(200);
+    const pullPayload = await pullResponse.json() as any;
+    expect(pullPayload.changes.expenses.created).toHaveLength(1);
+    expect(pullPayload.changes.expenses.created[0].id).toBe(expenseId);
   });
 
   test('POST /api/sync rejects extra fields in a strict payload', async () => {
