@@ -4,17 +4,19 @@ A robust backend service for personal expense management, built on **Cloudflare 
 
 ## 🚀 Features
 
-- **Authentication:** Secure user registration and login using JWT.
-- **Data Synchronization:** Efficient bi-directional sync (delta updates) allowing clients to push changes and pull updates since the last sync.
-- **Data Integrity:** Strict server-side validation, including support for non-negative expense constraints.
-- **Performance:** Built on Cloudflare Workers and D1, ensuring low latency and high availability.
+- **Authentication & Validation:** Secure user registration and login with JWT and Zod validation (Strict email and password requirements).
+- **Data Synchronization:** Efficient bi-directional sync (delta updates) based on WatermelonDB's protocol.
+- **Automated Recurring Expenses:** Hourly Cron Trigger to process and generate expenses from recurring rules.
+- **CORS Support:** Integrated middleware to facilitate cross-origin requests from frontend applications.
+- **Performance:** Built on Cloudflare Workers and D1 for low latency and high availability.
 
 ## 🛠 Tech Stack
 
-- **Framework:** Hono
-- **Database:** Cloudflare D1 (SQL)
-- **ORM:** Drizzle ORM
-- **Runtime:** Bun (for development and testing)
+- **Framework:** [Hono](https://hono.dev)
+- **Database:** [Cloudflare D1](https://developers.cloudflare.com/d1/)
+- **ORM:** [Drizzle ORM](https://orm.drizzle.team)
+- **Validation:** [Zod](https://zod.dev)
+- **Runtime:** [Bun](https://bun.sh) (for development and testing)
 - **Auth:** JWT / bcryptjs
 
 ## 📦 Getting Started
@@ -31,7 +33,12 @@ A robust backend service for personal expense management, built on **Cloudflare 
    bun install
    ```
 
-2. Run the development server:
+2. Create local worker vars:
+   ```bash
+   cp .dev.vars.example .dev.vars
+   ```
+
+3. Run the development server:
    ```bash
    bun run dev
    ```
@@ -43,20 +50,33 @@ Apply migrations to your local D1 instance:
 bunx wrangler d1 migrations apply DB --local
 ```
 
+Deploying migrations to production:
+```bash
+bunx wrangler d1 migrations apply DB --remote
+```
+
+Set production secrets before deploying:
+```bash
+wrangler secret put JWT_SECRET
+```
+
+Optional runtime variable:
+- `CORS_ORIGIN`: lista separada por comas con orígenes permitidos.
+
 ## 🧪 Testing
 
-The project includes a comprehensive test suite using `bun test` with an in-memory database mock for rapid validation.
+The project includes a fast test suite using `bun test`, plus `bun run typecheck` for static validation.
 
 Run all tests:
 ```bash
 bun test
 ```
 
-Tests cover:
-- Authentication flows (register/login/duplicate users/bad credentials)
-- Protected endpoints (profile/expenses access)
-- Synchronization logic (delta push/pull, invalid payload handling, business rule enforcement)
+Run typecheck:
+```bash
+bun run typecheck
+```
 
 ## 🔑 API Documentation
 
-See `API_DOCUMENTATION.md` for a detailed breakdown of endpoints, request schemas, and response formats.
+See `API_DOCUMENTATION.md` for a detailed breakdown of endpoints, request schemas, and business rules.

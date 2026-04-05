@@ -28,6 +28,9 @@
 			"migrations_dir": "drizzle"
 		}
 	],
+	"triggers": {
+		"crons": ["0 * * * *"]
+	}
 	// "ai": {
 	//   "binding": "AI"
 	// },

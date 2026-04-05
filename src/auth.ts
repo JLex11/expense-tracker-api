@@ -1,22 +1,26 @@
 import { Hono } from 'hono';
 import { sign } from 'hono/jwt';
+import { zValidator } from '@hono/zod-validator';
 import { getDb } from './db';
 import { users } from './db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import * as bcrypt from 'bcryptjs';
 import type { CloudflareBindings } from './types';
+import { authSchema } from './validators';
 
 const auth = new Hono<{ Bindings: CloudflareBindings }>();
 
-auth.post('/register', async (c) => {
-  const { email, password } = await c.req.json();
+auth.post('/register', zValidator('json', authSchema), async (c) => {
+  const { email, password } = c.req.valid('json');
   const db = getDb(c.env);
 
-  const existingUser = await db.query.users.findFirst({
-    where: eq(users.email, email),
-  });
+  const existingUser = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
 
-  if (existingUser) {
+  if (existingUser.length > 0) {
     return c.json({ error: 'User already exists' }, 400);
   }
 
@@ -38,30 +42,32 @@ auth.post('/register', async (c) => {
 
   const token = await sign(payload, c.env.JWT_SECRET);
 
-  return c.json({ token, user: { id, email } });
+  return c.json({ token, user: { id, email } }, 201);
 });
 
-auth.post('/login', async (c) => {
-  const { email, password } = await c.req.json();
+auth.post('/login', zValidator('json', authSchema), async (c) => {
+  const { email, password } = c.req.valid('json');
   const db = getDb(c.env);
 
-  const user = await db.query.users.findFirst({
-    where: eq(users.email, email),
-  });
+  const user = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.email, email), isNull(users.deletedAt)))
+    .limit(1);
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
+  if (user.length === 0 || !(await bcrypt.compare(password, user[0].password))) {
     return c.json({ error: 'Invalid credentials' }, 401);
   }
 
   const payload = {
-    id: user.id,
-    email: user.email,
+    id: user[0].id,
+    email: user[0].email,
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7, // 1 week
   };
 
   const token = await sign(payload, c.env.JWT_SECRET);
 
-  return c.json({ token, user: { id: user.id, email: user.email } });
+  return c.json({ token, user: { id: user[0].id, email: user[0].email } });
 });
 
 export default auth;

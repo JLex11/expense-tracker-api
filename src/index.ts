@@ -1,57 +1,51 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { jwt } from 'hono/jwt';
 import auth from './auth';
 import sync from './sync';
 import { getDb } from './db';
 import { expenses, users } from './db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc, isNull } from 'drizzle-orm';
 import type { CloudflareBindings, JWTPayload } from './types';
-const apiDoc = `# Expense Tracker API Reference
+import { scheduled } from './scheduled';
 
-## 1. Authentication
-All protected routes require a JWT in the \`Authorization: Bearer <token>\` header.
+const apiDoc = `Expense Tracker API
 
-### POST /api/auth/register
-- **Description**: Creates a new user account.
-- **Request**: \`{ "email": "string", "password": "string" }\`
-- **Response**: \`{ "token": "string", "user": { "id": "string", "email": "string" } }\`
+Routes:
+- POST /api/auth/register
+- POST /api/auth/login
+- GET /api/sync
+- POST /api/sync
+- GET /api/expenses
+- GET /api/profile
 
-### POST /api/auth/login
-- **Description**: Authenticates user and returns a token.
-- **Request**: \`{ "email": "string", "password": "string" }\`
-- **Response**: \`{ "token": "string", "user": { "id": "string", "email": "string" } }\`
-
-## 2. Synchronization (WatermelonDB Protocol)
-The system uses Delta Sync to keep local and server databases in sync.
-
-### GET /api/sync
-- **Query Params**: \`last_pulled_at\` (timestamp, milliseconds).
-- **Description**: Downloads changes since the last pull.
-- **Response**: \`{ changes: { <table_name>: { created: [], updated: [], deleted: [] } }, timestamp: number }\`
-
-### POST /api/sync
-- **Description**: Uploads local changes to the server.
-- **Request**: \`{ changes: { <table_name>: { created: [], updated: [], deleted: [] } }, last_pulled_at: number }\`
-
-## 3. Resources
-### GET /api/expenses
-- **Auth**: Protected.
-- **Description**: Returns the last 50 expenses for the authenticated user, sorted by date.
-
-### GET /api/profile
-- **Auth**: Protected.
-- **Description**: Returns the authenticated user's profile information.
-
-## 4. Data Models (Contracts)
-- **Common Fields**: All models use \`id\` (UUID), \`userId\` (FK), \`createdAt\` (number), \`updatedAt\` (number), and \`deletedAt\` (number | null).
-- **Users**: \`id\`, \`email\`, \`password\` (hashed).
-- **Categories**: \`name\`, \`icon\`.
-- **Expenses**: \`amount\` (real), \`categoryId\`, \`date\`, \`note\`, \`paymentMethod\`, \`status\`, \`origin\`, \`recurringRuleId\`, \`resolvedAt\`.
-- **RecurringExpenseRules**: \`amount\`, \`categoryId\`, \`intervalValue\`, \`intervalUnit\`, \`startDate\`, \`nextDueAt\`, \`isActive\`.
-- **Budgets**: \`categoryId\`, \`monthKey\`, \`limitAmount\`.
+See the repository documentation for the full API contract and sync rules.
 `;
 
-const app = new Hono<{ Bindings: CloudflareBindings; Variables: { jwtPayload: JWTPayload } }>();
+export const app = new Hono<{ Bindings: CloudflareBindings; Variables: { jwtPayload: JWTPayload } }>();
+
+app.use(
+  '/*',
+  cors({
+    origin: (origin, c) => {
+      const configuredOrigins = (c.env.CORS_ORIGIN ?? '')
+        .split(',')
+        .map((value: string) => value.trim())
+        .filter(Boolean);
+      if (!configuredOrigins || configuredOrigins.length === 0) {
+        return '*';
+      }
+
+      if (!origin) {
+        return configuredOrigins[0];
+      }
+
+      return configuredOrigins.includes(origin) ? origin : configuredOrigins[0];
+    },
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+  }),
+);
 
 app.get('/', (c) => c.text(apiDoc));
 
@@ -81,7 +75,7 @@ app.get('/api/expenses', async (c) => {
   const result = await db
     .select()
     .from(expenses)
-    .where(eq(expenses.userId, userId))
+    .where(and(eq(expenses.userId, userId), isNull(expenses.deletedAt)))
     .orderBy(desc(expenses.date))
     .limit(50);
 
@@ -92,15 +86,21 @@ app.get('/api/profile', async (c) => {
   const userId = c.get('jwtPayload').id;
   const db = getDb(c.env);
   
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, userId),
-    columns: {
-      password: false,
-    },
-  });
+  const user = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      updatedAt: users.updatedAt,
+    })
+    .from(users)
+    .where(and(eq(users.id, userId), isNull(users.deletedAt)))
+    .limit(1);
 
-  if (!user) return c.json({ error: 'User not found' }, 404);
-  return c.json(user);
+  if (user.length === 0) return c.json({ error: 'User not found' }, 404);
+  return c.json(user[0]);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled
+};

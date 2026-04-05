@@ -1,0 +1,3 @@
+JWT_SECRET=change-me-in-local-dev
+# Optional comma-separated allowlist for CORS in local development.
+# CORS_ORIGIN=http://localhost:3000,http://localhost:5173

@@ -14,19 +14,22 @@ Todas las tablas (incluidas las nuevas y `recurring_expense_rules`) cumplen con:
 
 ---
 
-## 🔐 Autenticación
+## 🔐 Autenticación y Validación
 
-Todas las rutas bajo `/api/*` (excepto `/api/auth/*`) requieren un token Bearer JWT.
+Todas las rutas bajo `/api/*` (excepto `/api/auth/*`) requieren un token Bearer JWT. 
+La API utiliza **Zod** para validación estricta de esquemas en todas las entradas.
 
 ### Registro
 `POST /api/auth/register`
 - **Body**: `{"email": "...", "password": "..."}`
-- **Respuesta**: `{"token": "...", "user": {"id": "...", "email": "..."}}`
+  - `email`: Debe ser un formato de correo válido.
+  - `password`: Mínimo 8 caracteres.
+- **Respuesta (`201 Created`)**: `{"token": "...", "user": {"id": "...", "email": "..."}}`
 
 ### Login
 `POST /api/auth/login`
 - **Body**: `{"email": "...", "password": "..."}`
-- **Respuesta**: Token JWT y datos del usuario.
+- **Respuesta (`200 OK`)**: Token JWT y datos del usuario.
 
 ---
 
@@ -34,6 +37,7 @@ Todas las rutas bajo `/api/*` (excepto `/api/auth/*`) requieren un token Bearer 
 
 Este es el mecanismo nativo mediante el cual WatermelonDB descarga e inserta registros.
 El protocolo se divide en dos métodos en el mismo endpoint `/api/sync`: `GET` para bajar datos (Pull) y `POST` para subir cambios (Push).
+Las actualizaciones entrantes usan `updatedAt` para aplicar un criterio Last Write Wins. Los borrados se aplican solo si el servidor no recibió cambios más nuevos desde `last_pulled_at`.
 
 ### Pull (GET)
 El cliente llama a este endpoint proporcionando la última vez que sincronizó.
@@ -53,7 +57,7 @@ El cliente llama a este endpoint proporcionando la última vez que sincronizó.
 ```
 
 ### Push (POST)
-Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con todas sus colecciones.
+Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con todas sus colecciones. Validado mediante esquemas de Zod para asegurar la integridad de la sincronización.
 `POST /api/sync`
 - **Body**:
 ```json
@@ -67,7 +71,17 @@ Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con 
   }
 }
 ```
-- **Respuesta (`200 OK`)**: Todo ha ido bien, aplicar cambios localmente. El backend utilizará transacciones SQL seguras (o lotes iterados) e ignorará un DELETE si no existe, o insertará un update en formato First/Last-Write-Wins.
+- **Respuesta (`200 OK`)**: Todo ha ido bien, aplicar cambios localmente. 
+- **Validaciones de Negocio**: 
+  - No se permiten importes de gastos (`expenses.amount`) negativos.
+
+---
+
+## ⏰ Automatización: Gastos Recurrentes
+
+La API incluye un procesador de tareas programadas (**Cloudflare Cron Trigger**) que se ejecuta cada hora.
+- **Funcionamiento**: Escanea la tabla `recurring_expense_rules` en busca de reglas activas donde `nextDueAt` haya pasado.
+- **Acción**: Crea automáticamente un nuevo registro en `expenses` y actualiza `nextDueAt` según el intervalo definido (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`). También acepta los valores legacy `DAY`, `WEEK`, `MONTH`, `YEAR`.
 
 ---
 
@@ -89,4 +103,5 @@ Watermelon reúne todos sus cambios offline y los agrupa en un super objeto con 
 - **Framework**: [Hono](https://hono.dev)
 - **Base de Datos**: [Cloudflare D1](https://developers.cloudflare.com/d1/)
 - **ORM**: [Drizzle ORM](https://orm.drizzle.team)
-- **Auth**: JWT con `hono/jwt` y `bcryptjs`.
+- **Validación**: [Zod](https://zod.dev)
+- **Seguridad**: JWT con `hono/jwt`, `bcryptjs` y CORS configurable mediante `CORS_ORIGIN`.

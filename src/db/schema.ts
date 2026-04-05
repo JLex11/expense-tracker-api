@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -16,7 +17,9 @@ export const categories = sqliteTable('categories', {
   createdAt: integer('created_at', { mode: 'number' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'number' }).notNull(),
   deletedAt: integer('deleted_at', { mode: 'number' }),
-});
+}, (table) => [
+  index('categories_user_updated_idx').on(table.userId, table.updatedAt),
+]);
 
 export const expenses = sqliteTable('expenses', {
   id: text('id').primaryKey(), // UUID string
@@ -33,7 +36,13 @@ export const expenses = sqliteTable('expenses', {
   createdAt: integer('created_at', { mode: 'number' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'number' }).notNull(),
   deletedAt: integer('deleted_at', { mode: 'number' }),
-});
+}, (table) => [
+  index('expenses_user_updated_idx').on(table.userId, table.updatedAt),
+  index('expenses_user_date_idx').on(table.userId, table.date),
+  index('expenses_recurring_lookup_idx').on(table.userId, table.recurringRuleId, table.date),
+  uniqueIndex('expenses_recurring_occurrence_unique').on(table.userId, table.recurringRuleId, table.date)
+    .where(sql`${table.recurringRuleId} is not null`),
+]);
 
 export const recurringExpenseRules = sqliteTable('recurring_expense_rules', {
   id: text('id').primaryKey(), // UUID string
@@ -50,7 +59,10 @@ export const recurringExpenseRules = sqliteTable('recurring_expense_rules', {
   createdAt: integer('created_at', { mode: 'number' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'number' }).notNull(),
   deletedAt: integer('deleted_at', { mode: 'number' }),
-});
+}, (table) => [
+  index('recurring_rules_user_updated_idx').on(table.userId, table.updatedAt),
+  index('recurring_rules_due_active_idx').on(table.isActive, table.nextDueAt),
+]);
 
 export const budgets = sqliteTable('budgets', {
   id: text('id').primaryKey(), // UUID string
@@ -61,4 +73,7 @@ export const budgets = sqliteTable('budgets', {
   createdAt: integer('created_at', { mode: 'number' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'number' }).notNull(),
   deletedAt: integer('deleted_at', { mode: 'number' }),
-});
+}, (table) => [
+  index('budgets_user_updated_idx').on(table.userId, table.updatedAt),
+  uniqueIndex('budgets_user_category_month_unique').on(table.userId, table.categoryId, table.monthKey),
+]);
