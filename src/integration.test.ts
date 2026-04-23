@@ -35,7 +35,16 @@ function runCommand(cmd: string[]) {
 async function waitForFile(path: string, timeoutMs = 20000) {
   const startedAt = Date.now();
 
-  while (!existsSync(path)) {
+  while (true) {
+    if (existsSync(path)) {
+      try {
+        JSON.parse(readFileSync(path, 'utf8'));
+        return;
+      } catch {
+        // The ready file can briefly exist before the write is fully flushed.
+      }
+    }
+
     if (Date.now() - startedAt > timeoutMs) {
       throw new Error(`Timed out waiting for file: ${path}`);
     }
@@ -213,5 +222,34 @@ describe('Worker integration with real D1', () => {
 
     expect(pullPayload.changes.categories.created.some((category) => category.id === categoryId)).toBe(true);
     expect(pullPayload.changes.expenses.created.some((expense) => expense.id === expenseId)).toBe(true);
+  });
+
+  test('creates receipt scan jobs behind auth', async () => {
+    const { token } = await registerAndLogin();
+    const clientScanId = crypto.randomUUID();
+    const form = new FormData();
+    form.append('clientScanId', clientScanId);
+    form.append('locale', 'es');
+    form.append('currency', 'USD');
+    form.append('timezone', 'America/Bogota');
+    form.append('image', new File([new Uint8Array([255, 216, 255, 217])], `${clientScanId}.jpg`, { type: 'image/jpeg' }));
+
+    const createResponse = await request('/api/receipt-scans', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+
+    expect(createResponse.status).toBe(201);
+    const createPayload = await createResponse.json() as { scanId: string };
+    expect(createPayload.scanId).toBeTruthy();
+
+    const statusResponse = await request(`/api/receipt-scans/${createPayload.scanId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(statusResponse.status).toBe(200);
+    const statusPayload = await statusResponse.json() as { status: string };
+    expect(['queued', 'processing', 'completed', 'failed']).toContain(statusPayload.status);
   });
 });

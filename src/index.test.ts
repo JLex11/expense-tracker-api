@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { app } from './index';
+import { processReceiptScan } from './receipt-processing';
 import { normalizeRecurringIntervalUnit, advanceRecurringDate } from './recurring';
 import { isIncomingChangeNewer, shouldApplyDelete } from './sync-logic';
 
@@ -11,6 +12,11 @@ const dbState = {
   categories: [] as MockRecord[],
   budgets: [] as MockRecord[],
   recurringExpenseRules: [] as MockRecord[],
+  receiptScans: [] as MockRecord[],
+  receiptScanUsage: [] as MockRecord[],
+  receiptScanRateLimits: [] as MockRecord[],
+  receiptImages: new Map<string, { body: Blob | ReadableStream; metadata?: Record<string, string> }>(),
+  receiptQueueMessages: [] as Array<{ scanId: string }>,
 };
 
 const rawColumnOrderByTable: Record<string, Array<[string, string]>> = {
@@ -72,6 +78,35 @@ const rawColumnOrderByTable: Record<string, Array<[string, string]>> = {
     ['updated_at', 'updatedAt'],
     ['deleted_at', 'deletedAt'],
   ],
+  receipt_scans: [
+    ['scan_id', 'scanId'],
+    ['client_scan_id', 'clientScanId'],
+    ['user_id', 'userId'],
+    ['status', 'status'],
+    ['locale', 'locale'],
+    ['currency', 'currency'],
+    ['timezone', 'timezone'],
+    ['image_object_key', 'imageObjectKey'],
+    ['parsed_data_json', 'parsedDataJson'],
+    ['failure_message', 'failureMessage'],
+    ['created_at', 'createdAt'],
+    ['updated_at', 'updatedAt'],
+    ['completed_at', 'completedAt'],
+  ],
+  receipt_scan_usage: [
+    ['id', 'id'],
+    ['user_id', 'userId'],
+    ['bucket_key', 'bucketKey'],
+    ['count', 'count'],
+    ['updated_at', 'updatedAt'],
+  ],
+  receipt_scan_rate_limits: [
+    ['id', 'id'],
+    ['user_id', 'userId'],
+    ['bucket_key', 'bucketKey'],
+    ['count', 'count'],
+    ['updated_at', 'updatedAt'],
+  ],
 };
 
 function resetDbState() {
@@ -80,6 +115,11 @@ function resetDbState() {
   dbState.categories = [];
   dbState.budgets = [];
   dbState.recurringExpenseRules = [];
+  dbState.receiptScans = [];
+  dbState.receiptScanUsage = [];
+  dbState.receiptScanRateLimits = [];
+  dbState.receiptImages = new Map();
+  dbState.receiptQueueMessages = [];
 }
 
 function getTableRecords(tableName: string) {
@@ -94,6 +134,12 @@ function getTableRecords(tableName: string) {
       return dbState.budgets;
     case 'recurring_expense_rules':
       return dbState.recurringExpenseRules;
+    case 'receipt_scans':
+      return dbState.receiptScans;
+    case 'receipt_scan_usage':
+      return dbState.receiptScanUsage;
+    case 'receipt_scan_rate_limits':
+      return dbState.receiptScanRateLimits;
     default:
       return [];
   }
@@ -117,6 +163,18 @@ function filterRows(rows: MockRecord[], query: string, params: any[]) {
     filteredRows = filteredRows.filter((row) => row.id === params[0]);
   }
 
+  if (normalizedQuery.includes('"scan_id" = ?') || normalizedQuery.includes('`scan_id` = ?')) {
+    filteredRows = filteredRows.filter((row) => params.includes(row.scanId));
+  }
+
+  if (normalizedQuery.includes('"client_scan_id" = ?') || normalizedQuery.includes('`client_scan_id` = ?')) {
+    filteredRows = filteredRows.filter((row) => params.includes(row.clientScanId));
+  }
+
+  if (normalizedQuery.includes('"bucket_key" = ?') || normalizedQuery.includes('`bucket_key` = ?')) {
+    filteredRows = filteredRows.filter((row) => params.includes(row.bucketKey));
+  }
+
   if (normalizedQuery.includes('"user_id" = ? and "expenses"."updated_at" > ?')) {
     filteredRows = filteredRows.filter((row) => row.userId === params[0] && row.updatedAt > params[1]);
   }
@@ -134,7 +192,7 @@ function filterRows(rows: MockRecord[], query: string, params: any[]) {
   }
 
   if (normalizedQuery.includes('"user_id" = ?') && !normalizedQuery.includes('updated_at" > ?')) {
-    filteredRows = filteredRows.filter((row) => row.userId === params[0]);
+    filteredRows = filteredRows.filter((row) => params.includes(row.userId));
   }
 
   if (normalizedQuery.includes('"deleted_at" is null')) {
@@ -217,6 +275,31 @@ function toDriverRow(tableName: string, row: MockRecord) {
         created_at: row.createdAt,
         updated_at: row.updatedAt,
         deleted_at: row.deletedAt,
+      };
+    case 'receipt_scans':
+      return {
+        scan_id: row.scanId,
+        client_scan_id: row.clientScanId,
+        user_id: row.userId,
+        status: row.status,
+        locale: row.locale,
+        currency: row.currency,
+        timezone: row.timezone,
+        image_object_key: row.imageObjectKey,
+        parsed_data_json: row.parsedDataJson,
+        failure_message: row.failureMessage,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+        completed_at: row.completedAt,
+      };
+    case 'receipt_scan_usage':
+    case 'receipt_scan_rate_limits':
+      return {
+        id: row.id,
+        user_id: row.userId,
+        bucket_key: row.bucketKey,
+        count: row.count,
+        updated_at: row.updatedAt,
       };
     default:
       return row;
@@ -314,6 +397,56 @@ function createMockStmt(query: string, params: any[] = []) {
         return { success: true, meta: { changes: 1 } };
       }
 
+      if (normalizedQuery.startsWith('insert into "receipt_scans"')) {
+        dbState.receiptScans.push({
+          scanId: params[0],
+          clientScanId: params[1],
+          userId: params[2],
+          status: params[3],
+          locale: params[4],
+          currency: params[5],
+          timezone: params[6],
+          imageObjectKey: params[7],
+          parsedDataJson: params[8],
+          failureMessage: params[9],
+          createdAt: params[10],
+          updatedAt: params[11],
+          completedAt: params[12],
+        });
+
+        return { success: true, meta: { changes: 1 } };
+      }
+
+      if (normalizedQuery.startsWith('insert into "receipt_scan_usage"')) {
+        dbState.receiptScanUsage.push({
+          id: params[0],
+          userId: params[1],
+          bucketKey: params[2],
+          count: params[3],
+          updatedAt: params[4],
+        });
+
+        return { success: true, meta: { changes: 1 } };
+      }
+
+      if (normalizedQuery.startsWith('insert into "receipt_scan_rate_limits"')) {
+        dbState.receiptScanRateLimits.push({
+          id: params[0],
+          userId: params[1],
+          bucketKey: params[2],
+          count: params[3],
+          updatedAt: params[4],
+        });
+
+        return { success: true, meta: { changes: 1 } };
+      }
+
+      if (normalizedQuery.startsWith('delete from "receipt_scans"')) {
+        const index = dbState.receiptScans.findIndex((row) => row.scanId === params[0]);
+        if (index >= 0) dbState.receiptScans.splice(index, 1);
+        return { success: true, meta: { changes: index >= 0 ? 1 : 0 } };
+      }
+
       if (normalizedQuery.startsWith('update "expenses"')) {
         const expense = dbState.expenses.find((row) => row.id === params[2] && row.userId === params[3]);
         if (expense) {
@@ -336,6 +469,54 @@ function createMockStmt(query: string, params: any[] = []) {
         return { success: true, meta: { changes: 0 } };
       }
 
+      if (normalizedQuery.startsWith('update "receipt_scan_usage"')) {
+        const record = dbState.receiptScanUsage.find((row) => row.userId === params[2] && row.bucketKey === params[3]);
+        if (record) {
+          record.count = params[0];
+          record.updatedAt = params[1];
+          return { success: true, meta: { changes: 1 } };
+        }
+
+        return { success: true, meta: { changes: 0 } };
+      }
+
+      if (normalizedQuery.startsWith('update "receipt_scan_rate_limits"')) {
+        const record = dbState.receiptScanRateLimits.find((row) => row.userId === params[2] && row.bucketKey === params[3]);
+        if (record) {
+          record.count = params[0];
+          record.updatedAt = params[1];
+          return { success: true, meta: { changes: 1 } };
+        }
+
+        return { success: true, meta: { changes: 0 } };
+      }
+
+      if (normalizedQuery.startsWith('update "receipt_scans"')) {
+        const scan = dbState.receiptScans.find((row) => params.includes(row.scanId));
+        if (!scan) {
+          return { success: true, meta: { changes: 0 } };
+        }
+
+        if (normalizedQuery.includes('"status" = ?')) {
+          scan.status = params[0];
+        }
+
+        if (normalizedQuery.includes('"parsed_data_json" = ?')) {
+          scan.parsedDataJson = params[1];
+          scan.failureMessage = params[2];
+          scan.updatedAt = params[3];
+          scan.completedAt = params[4];
+        } else if (normalizedQuery.includes('"failure_message" = ?')) {
+          scan.failureMessage = params[1];
+          scan.updatedAt = params[2];
+          scan.completedAt = params[3];
+        } else {
+          scan.updatedAt = params[1];
+        }
+
+        return { success: true, meta: { changes: 1 } };
+      }
+
       return { success: true, meta: { changes: 0 } };
     },
   };
@@ -347,6 +528,29 @@ const MOCK_ENV = {
     batch: async (commands: Array<ReturnType<typeof createMockStmt>>) => Promise.all(commands.map((command) => command.run())),
   } as unknown as D1Database,
   JWT_SECRET: 'test-secret',
+  RECEIPT_IMAGES: {
+    put: async (key: string, body: Blob | ReadableStream, options?: { customMetadata?: Record<string, string> }) => {
+      dbState.receiptImages.set(key, { body, metadata: options?.customMetadata });
+      return null;
+    },
+    get: async (key: string) => {
+      const stored = dbState.receiptImages.get(key);
+      if (!stored) return null;
+      return {
+        arrayBuffer: async () => stored.body instanceof Blob ? stored.body.arrayBuffer() : new Response(stored.body).arrayBuffer(),
+      };
+    },
+    delete: async (key: string) => {
+      dbState.receiptImages.delete(key);
+    },
+  } as unknown as R2Bucket,
+  RECEIPT_SCAN_QUEUE: {
+    send: async (message: { scanId: string }) => {
+      dbState.receiptQueueMessages.push(message);
+    },
+  } as unknown as Queue<{ scanId: string }>,
+  GOOGLE_VISION_API_KEY: 'test-vision-key',
+  GEMINI_API_KEY: 'test-gemini-key',
 };
 
 async function registerAndLogin(email: string) {
@@ -858,4 +1062,257 @@ describe('Expense Tracker API', () => {
 
     expect(response.status).toBe(400);
   });
+
+  test('POST /api/receipt-scans requires a token', async () => {
+    const response = await app.request('/api/receipt-scans', { method: 'POST' }, MOCK_ENV);
+    expect(response.status).toBe(401);
+  });
+
+  test('POST /api/receipt-scans validates required multipart fields', async () => {
+    const { token } = await registerAndLogin(`receipt-missing-${Date.now()}@example.com`);
+    const form = new FormData();
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(422);
+  });
+
+  test('POST /api/receipt-scans rejects non-JPEG files', async () => {
+    const { token } = await registerAndLogin(`receipt-type-${Date.now()}@example.com`);
+    const form = createReceiptScanForm({ imageType: 'image/png' });
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(415);
+  });
+
+  test('POST /api/receipt-scans rejects oversized images', async () => {
+    const { token } = await registerAndLogin(`receipt-large-${Date.now()}@example.com`);
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ imageSize: 4 * 1024 * 1024 + 1 }),
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(413);
+  });
+
+  test('POST /api/receipt-scans creates a queued scan and enqueues processing', async () => {
+    const { token, userId } = await registerAndLogin(`receipt-create-${Date.now()}@example.com`);
+    const clientScanId = crypto.randomUUID();
+    const form = createReceiptScanForm({ clientScanId });
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(201);
+    const payload = await response.json() as { scanId: string };
+    expect(payload.scanId).toBeTruthy();
+    expect(dbState.receiptScans).toHaveLength(1);
+    expect(dbState.receiptScans[0]).toMatchObject({
+      scanId: payload.scanId,
+      clientScanId,
+      userId,
+      status: 'queued',
+      currency: 'USD',
+    });
+    expect(dbState.receiptImages.size).toBe(1);
+    expect(dbState.receiptQueueMessages).toEqual([{ scanId: payload.scanId }]);
+  });
+
+  test('POST /api/receipt-scans is idempotent by clientScanId and does not consume extra limits', async () => {
+    const { token } = await registerAndLogin(`receipt-idempotent-${Date.now()}@example.com`);
+    const clientScanId = crypto.randomUUID();
+
+    const firstResponse = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ clientScanId }),
+      },
+      MOCK_ENV,
+    );
+    const firstPayload = await firstResponse.json() as { scanId: string };
+
+    const secondResponse = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ clientScanId }),
+      },
+      MOCK_ENV,
+    );
+    const secondPayload = await secondResponse.json() as { scanId: string };
+
+    expect(firstResponse.status).toBe(201);
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload.scanId).toBe(firstPayload.scanId);
+    expect(dbState.receiptScans).toHaveLength(1);
+    expect(dbState.receiptQueueMessages).toHaveLength(1);
+    expect(dbState.receiptScanUsage[0].count).toBe(1);
+    expect(dbState.receiptScanRateLimits[0].count).toBe(1);
+  });
+
+  test('POST /api/receipt-scans enforces the short per-user rate limit', async () => {
+    const { token } = await registerAndLogin(`receipt-rate-${Date.now()}@example.com`);
+
+    for (let index = 0; index < 5; index += 1) {
+      const response = await app.request(
+        '/api/receipt-scans',
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: createReceiptScanForm({ clientScanId: crypto.randomUUID() }),
+        },
+        MOCK_ENV,
+      );
+      expect(response.status).toBe(201);
+    }
+
+    const blockedResponse = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ clientScanId: crypto.randomUUID() }),
+      },
+      MOCK_ENV,
+    );
+
+    expect(blockedResponse.status).toBe(429);
+  });
+
+  test('POST /api/receipt-scans enforces the daily per-user scan limit', async () => {
+    const { token, userId } = await registerAndLogin(`receipt-daily-${Date.now()}@example.com`);
+    const todayBucket = new Date().toISOString().slice(0, 10);
+    dbState.receiptScanUsage.push({
+      id: `${userId}:${todayBucket}`,
+      userId,
+      bucketKey: todayBucket,
+      count: 15,
+      updatedAt: Date.now(),
+    });
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ clientScanId: crypto.randomUUID() }),
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(429);
+  });
+
+  test('GET /api/receipt-scans/:scanId returns completed and failed states for the owner only', async () => {
+    const { token, userId } = await registerAndLogin(`receipt-status-${Date.now()}@example.com`);
+    const other = await registerAndLogin(`receipt-status-other-${Date.now()}@example.com`);
+    dbState.receiptScans.push({
+      scanId: 'scan-completed',
+      clientScanId: crypto.randomUUID(),
+      userId,
+      status: 'completed',
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+      imageObjectKey: 'receipt-scans/test.jpg',
+      parsedDataJson: JSON.stringify({ amount: 10, warnings: [] }),
+      failureMessage: null,
+      createdAt: 1,
+      updatedAt: 2,
+      completedAt: 2,
+    });
+
+    const response = await app.request(
+      '/api/receipt-scans/scan-completed',
+      { headers: { Authorization: `Bearer ${token}` } },
+      MOCK_ENV,
+    );
+    expect(response.status).toBe(200);
+    const payload = await response.json() as any;
+    expect(payload.status).toBe('completed');
+    expect(payload.data.amount).toBe(10);
+
+    const blockedResponse = await app.request(
+      '/api/receipt-scans/scan-completed',
+      { headers: { Authorization: `Bearer ${other.token}` } },
+      MOCK_ENV,
+    );
+    expect(blockedResponse.status).toBe(404);
+  });
+
+  test('receipt scan processing marks missing images as failed', async () => {
+    const originalError = console.error;
+    console.error = () => undefined;
+    dbState.receiptScans.push({
+      scanId: 'scan-missing-image',
+      clientScanId: crypto.randomUUID(),
+      userId: 'user-1',
+      status: 'queued',
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+      imageObjectKey: 'receipt-scans/missing.jpg',
+      parsedDataJson: null,
+      failureMessage: null,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null,
+    });
+
+    try {
+      await processReceiptScan('scan-missing-image', MOCK_ENV);
+
+      expect(dbState.receiptScans[0].status).toBe('failed');
+      expect(dbState.receiptScans[0].failureMessage).toBe('No se pudo leer la factura');
+    } finally {
+      console.error = originalError;
+    }
+  });
 });
+
+function createReceiptScanForm(options: { clientScanId?: string; imageType?: string; imageSize?: number } = {}) {
+  const form = new FormData();
+  const clientScanId = options.clientScanId ?? crypto.randomUUID();
+  const imageType = options.imageType ?? 'image/jpeg';
+  const imageSize = options.imageSize ?? 12;
+  form.append('clientScanId', clientScanId);
+  form.append('locale', 'es');
+  form.append('currency', 'USD');
+  form.append('timezone', 'America/Bogota');
+  const extension = imageType === 'image/jpeg' ? 'jpg' : 'png';
+  form.append('image', new File([new Uint8Array(imageSize)], `${clientScanId}.${extension}`, { type: imageType }));
+  return form;
+}

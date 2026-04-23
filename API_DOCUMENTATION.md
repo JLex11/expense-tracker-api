@@ -17,6 +17,110 @@ Colecciones soportadas:
 - `budgets`
 - `recurring_expense_rules`
 
+## Escaneo de Facturas
+
+Los escaneos usan OCR asíncrono. El `POST` guarda el JPEG en R2, crea un job en D1, envía un mensaje a Cloudflare Queues y responde rápido. El consumer de Queue llama Google Vision con `DOCUMENT_TEXT_DETECTION` usando `API key` y luego Gemini con salida JSON estructurada. No se guarda el texto OCR raw.
+
+### POST /api/receipt-scans
+
+Headers:
+
+```http
+Authorization: Bearer <jwt>
+Accept: application/json
+Content-Type: multipart/form-data
+```
+
+Campos `form-data`:
+
+- `image`: archivo JPEG, máximo `4 MiB`
+- `clientScanId`: UUID generado por la app
+- `locale`: por ejemplo `es` o `en`
+- `currency`: por ejemplo `USD`, `DOP`, `COP`
+- `timezone`: por ejemplo `America/Bogota`
+
+Respuesta `201`:
+
+```json
+{
+  "scanId": "server-job-id"
+}
+```
+
+Idempotencia:
+
+- El backend guarda `(userId, clientScanId)` como clave única.
+- Si el mismo usuario reenvía el mismo `clientScanId`, responde `200` con el mismo `scanId`.
+- Los reintentos idempotentes no consumen cuota diaria ni límite por minuto.
+
+Límites:
+
+- `15` escaneos nuevos por usuario por día UTC.
+- `5` escaneos nuevos por usuario por minuto.
+- Si se excede un límite, responde `429`:
+
+```json
+{
+  "message": "Límite de escaneos alcanzado"
+}
+```
+
+### GET /api/receipt-scans/:scanId
+
+Devuelve solo escaneos del usuario autenticado.
+
+Pendiente:
+
+```json
+{
+  "status": "queued"
+}
+```
+
+Procesando:
+
+```json
+{
+  "status": "processing"
+}
+```
+
+Completado:
+
+```json
+{
+  "status": "completed",
+  "data": {
+    "amount": 123.45,
+    "date": "2026-04-23",
+    "merchant": "Supermercado X",
+    "currency": "USD",
+    "paymentMethod": "card",
+    "categoryHint": "Groceries",
+    "note": "Supermercado X",
+    "confidence": 0.86,
+    "warnings": []
+  }
+}
+```
+
+Fallido:
+
+```json
+{
+  "status": "failed",
+  "message": "No se pudo leer la factura"
+}
+```
+
+Si el `scanId` no existe o pertenece a otro usuario, responde `404`:
+
+```json
+{
+  "message": "Escaneo no encontrado"
+}
+```
+
 ### Reglas de Datos
 
 Todas las tablas sincronizables usan:
@@ -210,6 +314,16 @@ Secretos/variables relevantes:
 
 - `JWT_SECRET`: requerido
 - `CORS_ORIGIN`: opcional, lista separada por comas
+- `GOOGLE_VISION_API_KEY`: requerido para Google Vision OCR
+- `GEMINI_API_KEY`: API key de Gemini
+- `GEMINI_MODEL`: opcional, default `gemini-2.5-flash-lite`
+- `GOOGLE_VISION_LOCATION`: opcional, default `global`
+
+Bindings de Cloudflare:
+
+- `DB`: D1
+- `RECEIPT_IMAGES`: R2 privado para JPEGs temporales
+- `RECEIPT_SCAN_QUEUE`: Queue para procesar OCR fuera del request
 
 Si `CORS_ORIGIN` no está configurado, el Worker responde con `Access-Control-Allow-Origin: *`.
 

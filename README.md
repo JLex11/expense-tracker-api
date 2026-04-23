@@ -9,6 +9,7 @@ Backend for personal expense tracking, built on **Cloudflare Workers**, **D1** a
 - Conflict handling based on `updatedAt` last-write-wins semantics.
 - Soft deletes propagated through `pull`.
 - Hourly cron job for recurring expenses.
+- Async receipt scan jobs with R2, Queues, Google Vision OCR and Gemini parsing.
 - Configurable CORS through `CORS_ORIGIN`.
 - Test suite with both fast mocked tests and real local D1 integration tests.
 
@@ -39,11 +40,14 @@ cp .dev.vars.example .dev.vars
 
 ```bash
 JWT_SECRET=change-me-in-local-dev
+GOOGLE_VISION_API_KEY=your-google-vision-api-key
+GEMINI_API_KEY=your-gemini-api-key
 ```
 
 Optional:
 
 - `CORS_ORIGIN`: comma-separated allowlist such as `http://localhost:3000,http://localhost:5173`
+- `GEMINI_MODEL`: defaults to `gemini-2.5-flash-lite`
 
 ### Run the Worker
 
@@ -71,11 +75,19 @@ Before deploying or testing protected routes in production, configure at least:
 
 ```bash
 wrangler secret put JWT_SECRET
+wrangler secret put GOOGLE_VISION_API_KEY
+wrangler secret put GEMINI_API_KEY
 ```
 
 Optional runtime variable:
 
 - `CORS_ORIGIN`: comma-separated allowlist for browser clients. If omitted, the Worker falls back to `*`.
+- `GEMINI_MODEL`: configured in `wrangler.jsonc`, defaults to `gemini-2.5-flash-lite`.
+
+Provision these Cloudflare resources before production deploy:
+
+- R2 bucket: `expense-tracker-receipt-images`
+- Queue: `receipt-scan-jobs`
 
 ## Testing
 
@@ -104,7 +116,10 @@ bun run typecheck
 - `GET /api/expenses`
 - `GET /api/sync`
 - `POST /api/sync`
+- `POST /api/receipt-scans`
+- `GET /api/receipt-scans/:scanId`
 - scheduled cron via Worker `scheduled()`
+- queue consumer via Worker `queue()`
 
 ## Notes
 

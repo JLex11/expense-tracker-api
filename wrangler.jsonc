@@ -7,19 +7,15 @@
 	//   "nodejs_compat"
 	// ],
 	"vars": {
+		"GEMINI_MODEL": "gemini-2.5-flash-lite",
+		"GOOGLE_VISION_LOCATION": "global"
 	},
-	// "kv_namespaces": [
-	//   {
-	//     "binding": "MY_KV_NAMESPACE",
-	//     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-	//   }
-	// ],
-	// "r2_buckets": [
-	//   {
-	//     "binding": "MY_BUCKET",
-	//     "bucket_name": "my-bucket"
-	//   }
-	// ],
+	"r2_buckets": [
+		{
+			"binding": "RECEIPT_IMAGES",
+			"bucket_name": "expense-tracker-receipt-images"
+		}
+	],
 	"d1_databases": [
 		{
 			"binding": "DB",
@@ -30,6 +26,21 @@
 	],
 	"triggers": {
 		"crons": ["0 * * * *"]
+	},
+	"queues": {
+		"producers": [
+			{
+				"queue": "receipt-scan-jobs",
+				"binding": "RECEIPT_SCAN_QUEUE"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "receipt-scan-jobs",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5
+			}
+		]
 	}
 	// "ai": {
 	//   "binding": "AI"

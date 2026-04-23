@@ -55,10 +55,26 @@ Common sync fields:
   - latest 50 expenses
   - excludes soft-deleted records
 
+## Receipt Scans
+
+- `POST /api/receipt-scans`
+  - authenticated multipart upload
+  - fields: JPEG `image`, UUID `clientScanId`, `locale`, `currency`, `timezone`
+  - returns `201 { "scanId": "..." }`
+  - duplicate `clientScanId` for the same user returns `200` with the original `scanId`
+  - limits new scans to 15 per UTC day and 5 per minute per user
+- `GET /api/receipt-scans/:scanId`
+  - returns `queued`, `processing`, `completed` with parsed data, or `failed`
+  - missing or cross-user scans return `404`
+
 ## Runtime Config
 
 - `JWT_SECRET`: required
 - `CORS_ORIGIN`: optional comma-separated allowlist
+- `GOOGLE_VISION_API_KEY`: Google Vision API key
+- `GEMINI_API_KEY`: Gemini API key
+- `GEMINI_MODEL`: optional, defaults to `gemini-2.5-flash-lite`
+- `GOOGLE_VISION_LOCATION`: optional, defaults to `global`
 
 ## Testing
 

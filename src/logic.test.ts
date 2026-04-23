@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { advanceRecurringDate, normalizeRecurringIntervalUnit } from './recurring';
+import { buildGeminiReceiptPayload, normalizeParsedReceipt } from './receipt-ai';
 import { isIncomingChangeNewer, shouldApplyDelete } from './sync-logic';
 
 describe('recurring helpers', () => {
@@ -35,4 +36,56 @@ describe('sync conflict helpers', () => {
     expect(shouldApplyDelete(101, 100)).toBe(false);
     expect(shouldApplyDelete(150, undefined)).toBe(true);
   });
+});
+
+describe('receipt scan helpers', () => {
+  test('normalizes parsed receipt data for app defaults', () => {
+    const normalized = normalizeParsedReceipt({
+      amount: 12.5,
+      date: '2026-04-23',
+      merchant: ' Supermercado X ',
+      currency: null,
+      paymentMethod: 'unknown',
+      confidence: 1.5,
+      warnings: [' ok ', ''],
+    }, 'dop');
+
+    expect(normalized).toEqual({
+      amount: 12.5,
+      date: '2026-04-23',
+      merchant: 'Supermercado X',
+      currency: 'DOP',
+      paymentMethod: 'unknown',
+      categoryHint: null,
+      note: 'Supermercado X',
+      confidence: 1,
+      warnings: [' ok '],
+    });
+  });
+
+  test('rejects malformed dates and unsupported payment methods during normalization', () => {
+    const normalized = normalizeParsedReceipt({
+      date: '23/04/2026',
+      paymentMethod: 'check',
+      confidence: -1,
+      warnings: [],
+    }, 'usd');
+
+    expect(normalized.date).toBeNull();
+    expect(normalized.paymentMethod).toBeNull();
+    expect(normalized.confidence).toBe(0);
+    expect(normalized.currency).toBe('USD');
+  });
+
+  test('builds Gemini REST payload with structured JSON config fields', () => {
+    const payload = buildGeminiReceiptPayload('OCR text', {
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+    });
+
+    expect(payload.generationConfig.responseMimeType).toBe('application/json');
+    expect(payload.generationConfig.responseJsonSchema.type).toBe('object');
+  });
+
 });

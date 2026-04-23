@@ -3,11 +3,13 @@ import { cors } from 'hono/cors';
 import { jwt } from 'hono/jwt';
 import auth from './auth';
 import sync from './sync';
+import receiptScans from './receipt-scans';
 import { getDb } from './db';
 import { expenses, users } from './db/schema';
 import { and, eq, desc, isNull } from 'drizzle-orm';
 import type { CloudflareBindings, JWTPayload } from './types';
 import { scheduled } from './scheduled';
+import { processReceiptScanQueue } from './receipt-processing';
 
 const apiDoc = `Expense Tracker API
 
@@ -18,6 +20,8 @@ Routes:
 - POST /api/sync
 - GET /api/expenses
 - GET /api/profile
+- POST /api/receipt-scans
+- GET /api/receipt-scans/:scanId
 
 See the repository documentation for the full API contract and sync rules.
 `;
@@ -66,6 +70,7 @@ app.use('/api/*', async (c, next) => {
 
 // Sync endpoint
 app.route('/api/sync', sync);
+app.route('/api/receipt-scans', receiptScans);
 
 // Maintenance / Optional endpoints
 app.get('/api/expenses', async (c) => {
@@ -102,5 +107,6 @@ app.get('/api/profile', async (c) => {
 
 export default {
   fetch: app.fetch,
+  queue: processReceiptScanQueue,
   scheduled
 };
