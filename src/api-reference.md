@@ -60,8 +60,12 @@ Common sync fields:
 - `POST /api/receipt-scans`
   - authenticated multipart upload
   - fields: JPEG `image`, UUID `clientScanId`, `locale`, `currency`, `timezone`, JSON string `categories`
-  - returns `201 { "scanId": "..." }`
+  - returns `201 { "scanId": "..." }` for a new queued job
+  - also returns `201 { "scanId": "..." }` for an immediate completed cache hit with a new server scan id
+  - returns `200 { "scanId": "..." }` when the same user already has the same image + context in `queued` or `processing`
   - duplicate `clientScanId` for the same user returns `200` with the original `scanId`
+  - completed cache hits are global by exact normalized processing context, including normalized category ids/names
+  - failed scans are never reused as cache hits
   - limits new scans to 15 per UTC day and 5 per minute per user
 - `GET /api/receipt-scans/:scanId`
   - returns `queued`, `processing`, `completed` with parsed data, or `failed`

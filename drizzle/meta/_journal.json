@@ -29,6 +29,13 @@
       "when": 1776989700000,
       "tag": "0003_receipt_scan_categories",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1776998228682,
+      "tag": "0004_receipt_scan_cache",
+      "breakpoints": true
     }
   ]
 }

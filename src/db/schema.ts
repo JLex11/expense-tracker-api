@@ -87,6 +87,8 @@ export const receiptScans = sqliteTable('receipt_scans', {
   currency: text('currency').notNull(),
   timezone: text('timezone').notNull(),
   categoriesJson: text('categories_json'),
+  imageHash: text('image_hash'),
+  processingKey: text('processing_key'),
   imageObjectKey: text('image_object_key').notNull(),
   parsedDataJson: text('parsed_data_json'),
   failureMessage: text('failure_message'),
@@ -97,6 +99,9 @@ export const receiptScans = sqliteTable('receipt_scans', {
   uniqueIndex('receipt_scans_user_client_unique').on(table.userId, table.clientScanId),
   index('receipt_scans_user_scan_idx').on(table.userId, table.scanId),
   index('receipt_scans_status_updated_idx').on(table.status, table.updatedAt),
+  index('receipt_scans_processing_status_idx').on(table.processingKey, table.status),
+  uniqueIndex('receipt_scans_user_processing_inflight_unique').on(table.userId, table.processingKey)
+    .where(sql`${table.status} in ('queued', 'processing') and ${table.processingKey} is not null`),
 ]);
 
 export const receiptScanUsage = sqliteTable('receipt_scan_usage', {

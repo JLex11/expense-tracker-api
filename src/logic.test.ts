@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { advanceRecurringDate, normalizeRecurringIntervalUnit } from './recurring';
 import { buildGeminiReceiptPayload, normalizeParsedReceipt } from './receipt-ai';
+import { buildReceiptScanHashes, normalizeCategoriesForCache } from './receipt-scan-cache';
 import { isIncomingChangeNewer, shouldApplyDelete } from './sync-logic';
 
 describe('recurring helpers', () => {
@@ -94,5 +95,61 @@ describe('receipt scan helpers', () => {
     expect(payload.generationConfig.responseJsonSchema.type).toBe('object');
     expect(JSON.stringify(payload.contents)).toContain('cat-1');
     expect(JSON.stringify(payload.contents)).toContain('mejor candidata');
+  });
+
+  test('normalizes cache categories by trimming, filtering and sorting', () => {
+    expect(normalizeCategoriesForCache([
+      { id: ' cat-2 ', name: ' Transporte ' },
+      { id: '', name: 'Ignorar' },
+      { id: 'cat-1', name: ' Comida ' },
+    ])).toEqual([
+      { id: 'cat-1', name: 'Comida' },
+      { id: 'cat-2', name: 'Transporte' },
+    ]);
+  });
+
+  test('builds stable hashes for the same image and normalized context', async () => {
+    const image = new Uint8Array([1, 2, 3, 4]).buffer;
+    const first = await buildReceiptScanHashes({
+      image,
+      locale: ' es ',
+      currency: 'usd',
+      timezone: 'America/Bogota',
+      categories: [
+        { id: 'cat-2', name: 'Transporte' },
+        { id: 'cat-1', name: 'Comida' },
+      ],
+      geminiModel: 'gemini-test',
+    });
+    const second = await buildReceiptScanHashes({
+      image,
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+      categories: [
+        { id: 'cat-1', name: 'Comida' },
+        { id: 'cat-2', name: 'Transporte' },
+      ],
+      geminiModel: 'gemini-test',
+    });
+    const differentCurrency = await buildReceiptScanHashes({
+      image,
+      locale: 'es',
+      currency: 'COP',
+      timezone: 'America/Bogota',
+      categories: [
+        { id: 'cat-1', name: 'Comida' },
+        { id: 'cat-2', name: 'Transporte' },
+      ],
+      geminiModel: 'gemini-test',
+    });
+
+    expect(first.imageHash).toBe(second.imageHash);
+    expect(first.processingKey).toBe(second.processingKey);
+    expect(first.normalizedCategories).toEqual([
+      { id: 'cat-1', name: 'Comida' },
+      { id: 'cat-2', name: 'Transporte' },
+    ]);
+    expect(differentCurrency.processingKey).not.toBe(first.processingKey);
   });
 });

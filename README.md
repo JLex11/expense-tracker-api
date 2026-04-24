@@ -127,6 +127,7 @@ bun run typecheck
 - `GET /api/expenses` excludes soft-deleted expenses.
 - `GET /api/profile` excludes soft-deleted users.
 - Recurring rules accept both documented interval values (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`) and legacy aliases (`DAY`, `WEEK`, `MONTH`, `YEAR`).
+- `POST /api/receipt-scans` deduplicates exact JPEG uploads by exact normalized parse context, including normalized category ids/names. A completed cache hit returns `201` with a new `scanId`, while an in-flight match for the same user returns `200` with the existing `scanId`.
 
 ## Documentation
 

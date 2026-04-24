@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, or } from 'drizzle-orm';
 import { getDb } from './db';
 import { receiptScanRateLimits, receiptScans, receiptScanUsage } from './db/schema';
 import type { ReceiptCategoryOption } from './receipt-ai';
+import { buildReceiptScanHashes, normalizeReceiptLocale } from './receipt-scan-cache';
 import type { CloudflareBindings, JWTPayload } from './types';
 
 const maxImageBytes = 4 * 1024 * 1024;
@@ -24,7 +25,7 @@ receiptScansRoute.post('/', async (c) => {
   const clientScanId = String(body.clientScanId || '');
   const locale = normalizeReceiptLocale(String(body.locale || 'es'));
   const currency = String(body.currency || '').toUpperCase();
-  const timezone = String(body.timezone || '');
+  const timezone = String(body.timezone || '').trim();
   const categories = parseCategories(body.categories);
 
   if (!clientScanId || !uuidPattern.test(clientScanId) || !(image instanceof File)) {
@@ -53,6 +54,66 @@ receiptScansRoute.post('/', async (c) => {
     return c.json({ scanId: existingScan.scanId }, 200);
   }
 
+  const imageBytes = await image.arrayBuffer();
+  const {
+    imageHash,
+    processingKey,
+    normalizedCategories,
+  } = await buildReceiptScanHashes({
+    image: imageBytes,
+    locale,
+    currency,
+    timezone,
+    categories,
+    geminiModel: c.env.GEMINI_MODEL,
+  });
+  const normalizedCategoriesJson = JSON.stringify(normalizedCategories);
+  const completedScan = await findCompletedScanByProcessingKey(processingKey, c.env);
+  if (completedScan) {
+    const scanId = crypto.randomUUID();
+    const completedAt = Date.now();
+
+    try {
+      await db.insert(receiptScans).values({
+        scanId,
+        clientScanId,
+        userId,
+        status: 'completed',
+        locale,
+        currency,
+        timezone,
+        categoriesJson: normalizedCategoriesJson,
+        imageHash,
+        processingKey,
+        imageObjectKey: completedScan.imageObjectKey,
+        parsedDataJson: completedScan.parsedDataJson,
+        failureMessage: null,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+        completedAt,
+      });
+    } catch (error) {
+      const raceScan = await findScanByClientId(userId, clientScanId, c.env);
+      if (raceScan) {
+        return c.json({ scanId: raceScan.scanId }, 200);
+      }
+
+      console.error('receipt_scan_cache_create_failed', {
+        userId,
+        processingKey,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return c.json({ message: 'No se pudo crear el escaneo' }, 500);
+    }
+
+    return c.json({ scanId }, 201);
+  }
+
+  const inFlightScan = await findInFlightScanByProcessingKeyForUser(processingKey, userId, c.env);
+  if (inFlightScan) {
+    return c.json({ scanId: inFlightScan.scanId }, 200);
+  }
+
   const limitStatus = await reserveScanLimits(c.env, userId, Date.now());
   if (!limitStatus.allowed) {
     return c.json({ message: 'Límite de escaneos alcanzado' }, 429);
@@ -63,11 +124,6 @@ receiptScansRoute.post('/', async (c) => {
   const now = Date.now();
 
   try {
-    await c.env.RECEIPT_IMAGES.put(imageObjectKey, image.stream(), {
-      httpMetadata: { contentType: 'image/jpeg' },
-      customMetadata: { userId, scanId, clientScanId },
-    });
-
     await db.insert(receiptScans).values({
       scanId,
       clientScanId,
@@ -76,7 +132,9 @@ receiptScansRoute.post('/', async (c) => {
       locale,
       currency,
       timezone,
-      categoriesJson: JSON.stringify(categories),
+      categoriesJson: normalizedCategoriesJson,
+      imageHash,
+      processingKey,
       imageObjectKey,
       parsedDataJson: null,
       failureMessage: null,
@@ -84,11 +142,36 @@ receiptScansRoute.post('/', async (c) => {
       updatedAt: now,
       completedAt: null,
     });
+  } catch (error) {
+    await rollbackScanLimits(c.env, userId, limitStatus.reservation);
+
+    if (isUniqueConstraintError(error)) {
+      const claimedScan = await findInFlightScanByProcessingKeyForUser(processingKey, userId, c.env);
+      if (claimedScan) {
+        return c.json({ scanId: claimedScan.scanId }, 200);
+      }
+    }
+
+    const raceScan = await findScanByClientId(userId, clientScanId, c.env);
+    if (raceScan) {
+      return c.json({ scanId: raceScan.scanId }, 200);
+    }
+
+    console.error('receipt_scan_claim_failed', { userId, message: error instanceof Error ? error.message : String(error) });
+    return c.json({ message: 'No se pudo crear el escaneo' }, 500);
+  }
+
+  try {
+    await c.env.RECEIPT_IMAGES.put(imageObjectKey, imageBytes, {
+      httpMetadata: { contentType: 'image/jpeg' },
+      customMetadata: { userId, scanId, clientScanId },
+    });
 
     await c.env.RECEIPT_SCAN_QUEUE.send({ scanId });
   } catch (error) {
     await c.env.RECEIPT_IMAGES.delete(imageObjectKey).catch(() => undefined);
     await db.delete(receiptScans).where(eq(receiptScans.scanId, scanId)).catch(() => undefined);
+    await rollbackScanLimits(c.env, userId, limitStatus.reservation);
 
     const raceScan = await findScanByClientId(userId, clientScanId, c.env);
     if (raceScan) {
@@ -145,6 +228,42 @@ async function findScanByClientId(userId: string, clientScanId: string, env: Clo
   return records[0] ?? null;
 }
 
+async function findCompletedScanByProcessingKey(processingKey: string, env: CloudflareBindings) {
+  const db = getDb(env);
+  const records = await db
+    .select({
+      scanId: receiptScans.scanId,
+      imageObjectKey: receiptScans.imageObjectKey,
+      parsedDataJson: receiptScans.parsedDataJson,
+    })
+    .from(receiptScans)
+    .where(and(eq(receiptScans.processingKey, processingKey), eq(receiptScans.status, 'completed')))
+    .orderBy(desc(receiptScans.completedAt), desc(receiptScans.updatedAt))
+    .limit(1);
+
+  if (!records[0]?.parsedDataJson) {
+    return null;
+  }
+
+  return records[0];
+}
+
+async function findInFlightScanByProcessingKeyForUser(processingKey: string, userId: string, env: CloudflareBindings) {
+  const db = getDb(env);
+  const records = await db
+    .select({ scanId: receiptScans.scanId })
+    .from(receiptScans)
+    .where(and(
+      eq(receiptScans.processingKey, processingKey),
+      eq(receiptScans.userId, userId),
+      or(eq(receiptScans.status, 'queued'), eq(receiptScans.status, 'processing')),
+    ))
+    .orderBy(desc(receiptScans.updatedAt))
+    .limit(1);
+
+  return records[0] ?? null;
+}
+
 function parseStoredReceiptData(value: string | null) {
   if (!value) {
     return {};
@@ -190,9 +309,22 @@ async function reserveScanLimits(env: CloudflareBindings, userId: string, now: n
   const dayBucket = new Date(now).toISOString().slice(0, 10);
   const minuteBucket = Math.floor(now / 60000).toString();
   const minuteStatus = await incrementLimit(env, receiptScanRateLimits, userId, minuteBucket, now, maxMinuteScans);
-  if (!minuteStatus.allowed) return minuteStatus;
+  if (!minuteStatus.allowed) return { allowed: false as const };
 
-  return incrementLimit(env, receiptScanUsage, userId, dayBucket, now, maxDailyScans);
+  const dayStatus = await incrementLimit(env, receiptScanUsage, userId, dayBucket, now, maxDailyScans);
+  if (!dayStatus.allowed) {
+    await decrementLimit(env, receiptScanRateLimits, userId, minuteBucket, now);
+    return { allowed: false as const };
+  }
+
+  return {
+    allowed: true as const,
+    reservation: {
+      minuteBucket,
+      dayBucket,
+      now,
+    },
+  };
 }
 
 async function incrementLimit(
@@ -225,8 +357,42 @@ async function incrementLimit(
   return { allowed: count <= limit };
 }
 
-export default receiptScansRoute;
-
-function normalizeReceiptLocale(locale: string) {
-  return locale.trim().slice(0, 12) || 'es';
+async function rollbackScanLimits(
+  env: CloudflareBindings,
+  userId: string,
+  reservation: { minuteBucket: string; dayBucket: string; now: number },
+) {
+  await decrementLimit(env, receiptScanRateLimits, userId, reservation.minuteBucket, reservation.now);
+  await decrementLimit(env, receiptScanUsage, userId, reservation.dayBucket, reservation.now);
 }
+
+async function decrementLimit(
+  env: CloudflareBindings,
+  table: typeof receiptScanRateLimits | typeof receiptScanUsage,
+  userId: string,
+  bucketKey: string,
+  now: number,
+) {
+  const db = getDb(env);
+  const existing = await db
+    .select()
+    .from(table)
+    .where(and(eq(table.userId, userId), eq(table.bucketKey, bucketKey)))
+    .limit(1);
+
+  if (!existing[0]) {
+    return;
+  }
+
+  const count = Math.max(0, existing[0].count - 1);
+  await db
+    .update(table)
+    .set({ count, updatedAt: now })
+    .where(and(eq(table.userId, userId), eq(table.bucketKey, bucketKey)));
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return error instanceof Error && /unique/i.test(error.message);
+}
+
+export default receiptScansRoute;

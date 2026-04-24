@@ -19,7 +19,12 @@ Colecciones soportadas:
 
 ## Escaneo de Facturas
 
-Los escaneos usan OCR asíncrono. El `POST` guarda el JPEG en R2, crea un job en D1, envía un mensaje a Cloudflare Queues y responde rápido. El consumer de Queue llama Google Vision con `DOCUMENT_TEXT_DETECTION` usando `API key` y luego Gemini con salida JSON estructurada. No se guarda el texto OCR raw.
+Los escaneos usan OCR asíncrono. El `POST` sigue aceptando el mismo multipart, pero ahora evita reprocesar JPEGs idénticos cuando el contexto de parseo también es idéntico. La deduplicación se calcula con:
+
+- `image_hash`: `SHA-256` del JPEG exacto
+- `processing_key`: `SHA-256` del contexto normalizado exacto (`image_hash`, `locale`, `currency`, `timezone`, categorías normalizadas con sus `id` y `name`, `GEMINI_MODEL` y versión interna de cache)
+
+Si no hay hit, el flujo normal guarda el JPEG en R2, crea un job en D1, envía un mensaje a Cloudflare Queues y responde rápido. El consumer de Queue llama Google Vision con `DOCUMENT_TEXT_DETECTION` usando `API key` y luego Gemini con salida JSON estructurada. No se guarda el texto OCR raw.
 
 ### POST /api/receipt-scans
 
@@ -47,11 +52,27 @@ Campos `form-data`:
 ]
 ```
 
-Respuesta `201`:
+Respuesta `201` cuando crea trabajo nuevo:
 
 ```json
 {
   "scanId": "server-job-id"
+}
+```
+
+Respuesta `201` cuando encuentra un resultado `completed` ya cacheado para la misma imagen y el mismo contexto:
+
+```json
+{
+  "scanId": "new-server-scan-id"
+}
+```
+
+Respuesta `200` cuando el mismo usuario ya tiene un scan `queued` o `processing` para la misma imagen y el mismo contexto:
+
+```json
+{
+  "scanId": "existing-in-flight-scan-id"
 }
 ```
 
@@ -60,6 +81,8 @@ Idempotencia:
 - El backend guarda `(userId, clientScanId)` como clave única.
 - Si el mismo usuario reenvía el mismo `clientScanId`, responde `200` con el mismo `scanId`.
 - Los reintentos idempotentes no consumen cuota diaria ni límite por minuto.
+- Un hit de cache `completed` tampoco consume cuota adicional.
+- Un reuso de scan en curso (`queued` o `processing`) tampoco consume cuota adicional.
 
 Límites:
 
@@ -119,6 +142,7 @@ Reglas de categoria:
 - El backend intenta elegir la categoría más probable según comercio, items y contexto de la compra.
 - `categoryId` y `categoryName` se comportan como sugerencia inicial para el borrador de la app.
 - Solo responde `categoryId: null` y `categoryName: null` cuando ninguna categoría enviada parece una candidata razonable.
+- Para efectos de cache, las categorías se normalizan con `trim`, se descartan inválidas y se ordenan por `id` y luego `name`, así que el mismo set en distinto orden produce el mismo `processing_key`.
 
 Fallido:
 
@@ -136,6 +160,12 @@ Si el `scanId` no existe o pertenece a otro usuario, responde `404`:
   "message": "Escaneo no encontrado"
 }
 ```
+
+Notas de cache:
+
+- La cache de resultados `completed` es global por contexto exacto, no solo por usuario.
+- La reutilización de scans en curso solo ocurre dentro del mismo usuario; nunca devuelve un `scanId` ajeno.
+- Los scans `failed` no se reutilizan como cache.
 
 ### Reglas de Datos
 
