@@ -151,8 +151,10 @@ export function buildGeminiReceiptPayload(
 ) {
   const categoryInstructions = options.categories.length > 0
     ? [
-        'Elige solo una categoria de la lista.',
-        'Si no hay suficiente confianza, devuelve categoryId=null y categoryName=null.',
+        'Elige la categoria mas probable usando el contexto de la compra, el comercio y los items del OCR.',
+        'Solo puedes elegir una categoria de la lista.',
+        'Prefiere devolver la mejor candidata aunque no sea perfecta, porque esto se usa como borrador.',
+        'Solo devuelve categoryId=null y categoryName=null cuando ninguna categoria sea una candidata razonable.',
         `Categorias disponibles: ${JSON.stringify(options.categories)}`,
       ].join('\n')
     : 'No hay categorias disponibles. Devuelve categoryId=null y categoryName=null.';
@@ -169,7 +171,7 @@ export function buildGeminiReceiptPayload(
               `Currency preferida: ${options.currency}`,
               `Timezone: ${options.timezone}`,
               categoryInstructions,
-              'Devuelve solo JSON que cumpla el schema. Usa null si no hay confianza.',
+              'Devuelve solo JSON que cumpla el schema.',
               rawText,
             ].join('\n\n'),
           },

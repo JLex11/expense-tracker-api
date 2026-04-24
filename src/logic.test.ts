@@ -93,5 +93,6 @@ describe('receipt scan helpers', () => {
     expect(payload.generationConfig.responseMimeType).toBe('application/json');
     expect(payload.generationConfig.responseJsonSchema.type).toBe('object');
     expect(JSON.stringify(payload.contents)).toContain('cat-1');
+    expect(JSON.stringify(payload.contents)).toContain('mejor candidata');
   });
 });

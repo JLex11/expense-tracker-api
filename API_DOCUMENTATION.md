@@ -116,7 +116,9 @@ Completado:
 Reglas de categoria:
 
 - El backend solo puede elegir entre las categorías enviadas por la app.
-- Si no hay suficiente confianza, responde `categoryId: null` y `categoryName: null`.
+- El backend intenta elegir la categoría más probable según comercio, items y contexto de la compra.
+- `categoryId` y `categoryName` se comportan como sugerencia inicial para el borrador de la app.
+- Solo responde `categoryId: null` y `categoryName: null` cuando ninguna categoría enviada parece una candidata razonable.
 
 Fallido:
 
