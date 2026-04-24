@@ -86,6 +86,7 @@ const rawColumnOrderByTable: Record<string, Array<[string, string]>> = {
     ['locale', 'locale'],
     ['currency', 'currency'],
     ['timezone', 'timezone'],
+    ['categories_json', 'categoriesJson'],
     ['image_object_key', 'imageObjectKey'],
     ['parsed_data_json', 'parsedDataJson'],
     ['failure_message', 'failureMessage'],
@@ -285,6 +286,7 @@ function toDriverRow(tableName: string, row: MockRecord) {
         locale: row.locale,
         currency: row.currency,
         timezone: row.timezone,
+        categories_json: row.categoriesJson,
         image_object_key: row.imageObjectKey,
         parsed_data_json: row.parsedDataJson,
         failure_message: row.failureMessage,
@@ -406,12 +408,13 @@ function createMockStmt(query: string, params: any[] = []) {
           locale: params[4],
           currency: params[5],
           timezone: params[6],
-          imageObjectKey: params[7],
-          parsedDataJson: params[8],
-          failureMessage: params[9],
-          createdAt: params[10],
-          updatedAt: params[11],
-          completedAt: params[12],
+          categoriesJson: params[7],
+          imageObjectKey: params[8],
+          parsedDataJson: params[9],
+          failureMessage: params[10],
+          createdAt: params[11],
+          updatedAt: params[12],
+          completedAt: params[13],
         });
 
         return { success: true, meta: { changes: 1 } };
@@ -1118,6 +1121,22 @@ describe('Expense Tracker API', () => {
     expect(response.status).toBe(413);
   });
 
+  test('POST /api/receipt-scans rejects invalid categories payload', async () => {
+    const { token } = await registerAndLogin(`receipt-invalid-categories-${Date.now()}@example.com`);
+
+    const response = await app.request(
+      '/api/receipt-scans',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: createReceiptScanForm({ rawCategories: 'not-json' }),
+      },
+      MOCK_ENV,
+    );
+
+    expect(response.status).toBe(422);
+  });
+
   test('POST /api/receipt-scans creates a queued scan and enqueues processing', async () => {
     const { token, userId } = await registerAndLogin(`receipt-create-${Date.now()}@example.com`);
     const clientScanId = crypto.randomUUID();
@@ -1143,6 +1162,10 @@ describe('Expense Tracker API', () => {
       userId,
       status: 'queued',
       currency: 'USD',
+      categoriesJson: JSON.stringify([
+        { id: 'cat-1', name: 'Comida' },
+        { id: 'cat-2', name: 'Transporte' },
+      ]),
     });
     expect(dbState.receiptImages.size).toBe(1);
     expect(dbState.receiptQueueMessages).toEqual([{ scanId: payload.scanId }]);
@@ -1247,8 +1270,9 @@ describe('Expense Tracker API', () => {
       locale: 'es',
       currency: 'USD',
       timezone: 'America/Bogota',
+      categoriesJson: JSON.stringify([{ id: 'cat-1', name: 'Comida' }]),
       imageObjectKey: 'receipt-scans/test.jpg',
-      parsedDataJson: JSON.stringify({ amount: 10, warnings: [] }),
+      parsedDataJson: JSON.stringify({ amount: 10, categoryId: 'cat-1', categoryName: 'Comida', warnings: [] }),
       failureMessage: null,
       createdAt: 1,
       updatedAt: 2,
@@ -1264,6 +1288,8 @@ describe('Expense Tracker API', () => {
     const payload = await response.json() as any;
     expect(payload.status).toBe('completed');
     expect(payload.data.amount).toBe(10);
+    expect(payload.data.categoryId).toBe('cat-1');
+    expect(payload.data.categoryName).toBe('Comida');
 
     const blockedResponse = await app.request(
       '/api/receipt-scans/scan-completed',
@@ -1284,6 +1310,7 @@ describe('Expense Tracker API', () => {
       locale: 'es',
       currency: 'USD',
       timezone: 'America/Bogota',
+      categoriesJson: JSON.stringify([{ id: 'cat-1', name: 'Comida' }]),
       imageObjectKey: 'receipt-scans/missing.jpg',
       parsedDataJson: null,
       failureMessage: null,
@@ -1303,7 +1330,9 @@ describe('Expense Tracker API', () => {
   });
 });
 
-function createReceiptScanForm(options: { clientScanId?: string; imageType?: string; imageSize?: number } = {}) {
+function createReceiptScanForm(
+  options: { clientScanId?: string; imageType?: string; imageSize?: number; rawCategories?: string } = {},
+) {
   const form = new FormData();
   const clientScanId = options.clientScanId ?? crypto.randomUUID();
   const imageType = options.imageType ?? 'image/jpeg';
@@ -1312,6 +1341,10 @@ function createReceiptScanForm(options: { clientScanId?: string; imageType?: str
   form.append('locale', 'es');
   form.append('currency', 'USD');
   form.append('timezone', 'America/Bogota');
+  form.append('categories', options.rawCategories ?? JSON.stringify([
+    { id: 'cat-1', name: 'Comida' },
+    { id: 'cat-2', name: 'Transporte' },
+  ]));
   const extension = imageType === 'image/jpeg' ? 'jpg' : 'png';
   form.append('image', new File([new Uint8Array(imageSize)], `${clientScanId}.${extension}`, { type: imageType }));
   return form;

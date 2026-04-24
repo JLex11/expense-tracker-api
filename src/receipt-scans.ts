@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { getDb } from './db';
 import { receiptScanRateLimits, receiptScans, receiptScanUsage } from './db/schema';
+import type { ReceiptCategoryOption } from './receipt-ai';
 import type { CloudflareBindings, JWTPayload } from './types';
 
 const maxImageBytes = 4 * 1024 * 1024;
@@ -24,6 +25,7 @@ receiptScansRoute.post('/', async (c) => {
   const locale = normalizeReceiptLocale(String(body.locale || 'es'));
   const currency = String(body.currency || '').toUpperCase();
   const timezone = String(body.timezone || '');
+  const categories = parseCategories(body.categories);
 
   if (!clientScanId || !uuidPattern.test(clientScanId) || !(image instanceof File)) {
     return c.json({ message: 'Falta la imagen o el identificador del escaneo' }, 422);
@@ -31,6 +33,10 @@ receiptScansRoute.post('/', async (c) => {
 
   if (!currency || !timezone) {
     return c.json({ message: 'Faltan datos del escaneo' }, 422);
+  }
+
+  if (categories === null) {
+    return c.json({ message: 'Las categorías no son válidas' }, 422);
   }
 
   if (image.type !== 'image/jpeg') {
@@ -70,6 +76,7 @@ receiptScansRoute.post('/', async (c) => {
       locale,
       currency,
       timezone,
+      categoriesJson: JSON.stringify(categories),
       imageObjectKey,
       parsedDataJson: null,
       failureMessage: null,
@@ -147,6 +154,35 @@ function parseStoredReceiptData(value: string | null) {
     return JSON.parse(value);
   } catch {
     return {};
+  }
+}
+
+function parseCategories(rawValue: string | File | (string | File)[] | undefined): ReceiptCategoryOption[] | null {
+  if (rawValue === undefined) {
+    return [];
+  }
+
+  if (rawValue instanceof File || Array.isArray(rawValue)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as unknown;
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+
+    const categories = parsed
+      .filter((item): item is { id: unknown; name: unknown } => typeof item === 'object' && item !== null)
+      .map((item) => ({
+        id: typeof item.id === 'string' ? item.id.trim() : '',
+        name: typeof item.name === 'string' ? item.name.trim() : '',
+      }))
+      .filter((category) => category.id.length > 0 && category.name.length > 0);
+
+    return categories.length === parsed.length ? categories : null;
+  } catch {
+    return null;
   }
 }
 

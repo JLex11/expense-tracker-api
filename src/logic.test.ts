@@ -46,9 +46,10 @@ describe('receipt scan helpers', () => {
       merchant: ' Supermercado X ',
       currency: null,
       paymentMethod: 'unknown',
+      categoryId: 'cat-1',
       confidence: 1.5,
       warnings: [' ok ', ''],
-    }, 'dop');
+    }, 'dop', [{ id: 'cat-1', name: 'Comida' }]);
 
     expect(normalized).toEqual({
       amount: 12.5,
@@ -56,7 +57,8 @@ describe('receipt scan helpers', () => {
       merchant: 'Supermercado X',
       currency: 'DOP',
       paymentMethod: 'unknown',
-      categoryHint: null,
+      categoryId: 'cat-1',
+      categoryName: 'Comida',
       note: 'Supermercado X',
       confidence: 1,
       warnings: [' ok '],
@@ -67,14 +69,17 @@ describe('receipt scan helpers', () => {
     const normalized = normalizeParsedReceipt({
       date: '23/04/2026',
       paymentMethod: 'check',
+      categoryId: 'missing',
       confidence: -1,
       warnings: [],
-    }, 'usd');
+    }, 'usd', [{ id: 'cat-1', name: 'Comida' }]);
 
     expect(normalized.date).toBeNull();
     expect(normalized.paymentMethod).toBeNull();
     expect(normalized.confidence).toBe(0);
     expect(normalized.currency).toBe('USD');
+    expect(normalized.categoryId).toBeNull();
+    expect(normalized.categoryName).toBeNull();
   });
 
   test('builds Gemini REST payload with structured JSON config fields', () => {
@@ -82,10 +87,11 @@ describe('receipt scan helpers', () => {
       locale: 'es',
       currency: 'USD',
       timezone: 'America/Bogota',
+      categories: [{ id: 'cat-1', name: 'Comida' }],
     });
 
     expect(payload.generationConfig.responseMimeType).toBe('application/json');
     expect(payload.generationConfig.responseJsonSchema.type).toBe('object');
+    expect(JSON.stringify(payload.contents)).toContain('cat-1');
   });
-
 });

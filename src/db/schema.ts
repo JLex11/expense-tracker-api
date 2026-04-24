@@ -86,6 +86,7 @@ export const receiptScans = sqliteTable('receipt_scans', {
   locale: text('locale').notNull(),
   currency: text('currency').notNull(),
   timezone: text('timezone').notNull(),
+  categoriesJson: text('categories_json'),
   imageObjectKey: text('image_object_key').notNull(),
   parsedDataJson: text('parsed_data_json'),
   failureMessage: text('failure_message'),

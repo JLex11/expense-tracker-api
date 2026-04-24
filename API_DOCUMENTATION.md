@@ -38,6 +38,14 @@ Campos `form-data`:
 - `locale`: por ejemplo `es` o `en`
 - `currency`: por ejemplo `USD`, `DOP`, `COP`
 - `timezone`: por ejemplo `America/Bogota`
+- `categories`: JSON serializado con opciones permitidas, por ejemplo:
+
+```json
+[
+  { "id": "cat-1", "name": "Comida" },
+  { "id": "cat-2", "name": "Transporte" }
+]
+```
 
 Respuesta `201`:
 
@@ -96,13 +104,19 @@ Completado:
     "merchant": "Supermercado X",
     "currency": "USD",
     "paymentMethod": "card",
-    "categoryHint": "Groceries",
+    "categoryId": "cat-1",
+    "categoryName": "Groceries",
     "note": "Supermercado X",
     "confidence": 0.86,
     "warnings": []
   }
 }
 ```
+
+Reglas de categoria:
+
+- El backend solo puede elegir entre las categorías enviadas por la app.
+- Si no hay suficiente confianza, responde `categoryId: null` y `categoryName: null`.
 
 Fallido:
 

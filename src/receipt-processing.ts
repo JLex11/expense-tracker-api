@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { getDb } from './db';
 import { receiptScans } from './db/schema';
+import type { ReceiptCategoryOption } from './receipt-ai';
 import { extractReceiptText, parseReceiptText } from './receipt-ai';
 import type { CloudflareBindings, ReceiptScanQueueMessage } from './types';
 
@@ -33,10 +34,12 @@ export async function processReceiptScan(scanId: string, env: CloudflareBindings
 
     const image = await object.arrayBuffer();
     const rawText = await extractReceiptText(image, env);
+    const categories = parseStoredCategories(scan.categoriesJson);
     const parsedData = await parseReceiptText(rawText, env, {
       locale: scan.locale,
       currency: scan.currency,
       timezone: scan.timezone,
+      categories,
     });
 
     const completedAt = Date.now();
@@ -77,5 +80,28 @@ export async function processReceiptScan(scanId: string, env: CloudflareBindings
 export async function processReceiptScanQueue(batch: MessageBatch<ReceiptScanQueueMessage>, env: CloudflareBindings) {
   for (const message of batch.messages) {
     await processReceiptScan(message.body.scanId, env);
+  }
+}
+
+function parseStoredCategories(value: string | null): ReceiptCategoryOption[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((item): item is { id: unknown; name: unknown } => typeof item === 'object' && item !== null)
+      .map((item) => ({
+        id: typeof item.id === 'string' ? item.id.trim() : '',
+        name: typeof item.name === 'string' ? item.name.trim() : '',
+      }))
+      .filter((category) => category.id.length > 0 && category.name.length > 0);
+  } catch {
+    return [];
   }
 }

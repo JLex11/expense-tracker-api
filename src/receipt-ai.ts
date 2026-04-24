@@ -7,10 +7,16 @@ export type ParsedReceiptData = {
   merchant?: string | null;
   currency?: string | null;
   paymentMethod?: 'cash' | 'card' | 'transfer' | 'unknown' | null;
-  categoryHint?: string | null;
+  categoryId?: string | null;
+  categoryName?: string | null;
   note?: string | null;
   confidence?: number | null;
   warnings?: string[];
+};
+
+export type ReceiptCategoryOption = {
+  id: string;
+  name: string;
 };
 
 const parsedReceiptSchema = z.object({
@@ -19,7 +25,8 @@ const parsedReceiptSchema = z.object({
   merchant: z.string().nullable().optional(),
   currency: z.string().nullable().optional(),
   paymentMethod: z.string().nullable().optional(),
-  categoryHint: z.string().nullable().optional(),
+  categoryId: z.string().nullable().optional(),
+  categoryName: z.string().nullable().optional(),
   note: z.string().nullable().optional(),
   confidence: z.number().nullable().optional(),
   warnings: z.array(z.string()).optional(),
@@ -87,7 +94,11 @@ export async function extractReceiptText(image: ArrayBuffer, env: CloudflareBind
   return text;
 }
 
-export function normalizeParsedReceipt(input: unknown, fallbackCurrency: string): ParsedReceiptData {
+export function normalizeParsedReceipt(
+  input: unknown,
+  fallbackCurrency: string,
+  categories: ReceiptCategoryOption[] = [],
+): ParsedReceiptData {
   const parsed = parsedReceiptSchema.safeParse(input);
   const data = parsed.success ? parsed.data : {};
 
@@ -98,6 +109,7 @@ export function normalizeParsedReceipt(input: unknown, fallbackCurrency: string)
     : null;
   const merchant = cleanNullableString(data.merchant);
   const note = cleanNullableString(data.note) || merchant;
+  const matchedCategory = resolveCategorySelection(categories, data.categoryId);
 
   return {
     amount: typeof data.amount === 'number' ? data.amount : null,
@@ -105,7 +117,8 @@ export function normalizeParsedReceipt(input: unknown, fallbackCurrency: string)
     merchant,
     currency: (cleanNullableString(data.currency) || fallbackCurrency).toUpperCase(),
     paymentMethod,
-    categoryHint: cleanNullableString(data.categoryHint),
+    categoryId: matchedCategory?.id ?? null,
+    categoryName: matchedCategory?.name ?? null,
     note,
     confidence,
     warnings: Array.isArray(data.warnings) ? data.warnings.filter((warning) => warning.trim().length > 0) : [],
@@ -124,7 +137,26 @@ function normalizePaymentMethod(value: unknown): ParsedReceiptData['paymentMetho
   return null;
 }
 
-export function buildGeminiReceiptPayload(rawText: string, options: { locale: string; currency: string; timezone: string }) {
+function resolveCategorySelection(categories: ReceiptCategoryOption[], selectedId: unknown) {
+  if (typeof selectedId !== 'string' || selectedId.trim().length === 0) {
+    return null;
+  }
+
+  return categories.find((category) => category.id === selectedId.trim()) ?? null;
+}
+
+export function buildGeminiReceiptPayload(
+  rawText: string,
+  options: { locale: string; currency: string; timezone: string; categories: ReceiptCategoryOption[] },
+) {
+  const categoryInstructions = options.categories.length > 0
+    ? [
+        'Elige solo una categoria de la lista.',
+        'Si no hay suficiente confianza, devuelve categoryId=null y categoryName=null.',
+        `Categorias disponibles: ${JSON.stringify(options.categories)}`,
+      ].join('\n')
+    : 'No hay categorias disponibles. Devuelve categoryId=null y categoryName=null.';
+
   return {
     contents: [
       {
@@ -136,6 +168,7 @@ export function buildGeminiReceiptPayload(rawText: string, options: { locale: st
               `Locale: ${options.locale}`,
               `Currency preferida: ${options.currency}`,
               `Timezone: ${options.timezone}`,
+              categoryInstructions,
               'Devuelve solo JSON que cumpla el schema. Usa null si no hay confianza.',
               rawText,
             ].join('\n\n'),
@@ -153,7 +186,8 @@ export function buildGeminiReceiptPayload(rawText: string, options: { locale: st
           merchant: { type: ['string', 'null'] },
           currency: { type: ['string', 'null'] },
           paymentMethod: { type: ['string', 'null'], enum: ['cash', 'card', 'transfer', 'unknown', null] },
-          categoryHint: { type: ['string', 'null'] },
+          categoryId: { type: ['string', 'null'] },
+          categoryName: { type: ['string', 'null'] },
           note: { type: ['string', 'null'] },
           confidence: { type: ['number', 'null'] },
           warnings: { type: 'array', items: { type: 'string' } },
@@ -164,7 +198,11 @@ export function buildGeminiReceiptPayload(rawText: string, options: { locale: st
   };
 }
 
-export async function parseReceiptText(rawText: string, env: CloudflareBindings, options: { locale: string; currency: string; timezone: string }) {
+export async function parseReceiptText(
+  rawText: string,
+  env: CloudflareBindings,
+  options: { locale: string; currency: string; timezone: string; categories: ReceiptCategoryOption[] },
+) {
   const model = encodeURIComponent(env.GEMINI_MODEL || 'gemini-2.5-flash-lite');
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
     method: 'POST',
@@ -178,5 +216,5 @@ export async function parseReceiptText(rawText: string, env: CloudflareBindings,
     throw new Error(payload.error?.message || 'No se pudo interpretar la factura');
   }
 
-  return normalizeParsedReceipt(JSON.parse(text), options.currency);
+  return normalizeParsedReceipt(JSON.parse(text), options.currency, options.categories);
 }

@@ -59,12 +59,13 @@ Common sync fields:
 
 - `POST /api/receipt-scans`
   - authenticated multipart upload
-  - fields: JPEG `image`, UUID `clientScanId`, `locale`, `currency`, `timezone`
+  - fields: JPEG `image`, UUID `clientScanId`, `locale`, `currency`, `timezone`, JSON string `categories`
   - returns `201 { "scanId": "..." }`
   - duplicate `clientScanId` for the same user returns `200` with the original `scanId`
   - limits new scans to 15 per UTC day and 5 per minute per user
 - `GET /api/receipt-scans/:scanId`
   - returns `queued`, `processing`, `completed` with parsed data, or `failed`
+  - completed responses use `categoryId` and `categoryName`
   - missing or cross-user scans return `404`
 
 ## Runtime Config
