@@ -3,6 +3,12 @@ import { getDb } from './db';
 import { receiptScans } from './db/schema';
 import type { ReceiptCategoryOption } from './receipt-ai';
 import { extractReceiptText, parseReceiptText } from './receipt-ai';
+import {
+  buildReceiptOcrCacheContext,
+  createReceiptOcrCache,
+  extractReceiptCacheDocument,
+  isParsedReceiptDataJson,
+} from './receipt-ocr-cache';
 import type { CloudflareBindings, ReceiptScanQueueMessage } from './types';
 
 const failedMessage = 'No se pudo leer la factura';
@@ -35,7 +41,8 @@ export async function processReceiptScan(scanId: string, env: CloudflareBindings
     const image = await object.arrayBuffer();
     const rawText = await extractReceiptText(image, env);
     const categories = parseStoredCategories(scan.categoriesJson);
-    const parsedData = await parseReceiptText(rawText, env, {
+    const preparedOcr = extractReceiptCacheDocument(rawText);
+    const parsedData = await parseReceiptWithCache(preparedOcr.cleanedText, preparedOcr, env, {
       locale: scan.locale,
       currency: scan.currency,
       timezone: scan.timezone,
@@ -104,4 +111,46 @@ function parseStoredCategories(value: string | null): ReceiptCategoryOption[] {
   } catch {
     return [];
   }
+}
+
+async function parseReceiptWithCache(
+  cleanedText: string,
+  preparedOcr: ReturnType<typeof extractReceiptCacheDocument>,
+  env: CloudflareBindings,
+  options: { locale: string; currency: string; timezone: string; categories: ReceiptCategoryOption[] },
+) {
+  const cacheContext = await buildReceiptOcrCacheContext({
+    locale: options.locale,
+    currency: options.currency,
+    timezone: options.timezone,
+    categories: options.categories,
+    geminiModel: env.GEMINI_MODEL,
+  });
+  const cache = env.RECEIPT_FUZZY_CACHE ? createReceiptOcrCache(env.RECEIPT_FUZZY_CACHE) : null;
+
+  if (cache) {
+    const cacheResult = await cache.lookupPrepared(preparedOcr, cacheContext.contextHash);
+    if (cacheResult.payload !== null && isParsedReceiptDataJson(cacheResult.payload)) {
+      console.log(`receipt_fuzzy_cache_${cacheResult.decision}`, {
+        matchedExactHash: cacheResult.matchedExactHash,
+        textSimilarity: cacheResult.textSimilarity,
+      });
+      return cacheResult.payload;
+    }
+
+    console.log('receipt_fuzzy_cache_miss', {
+      matchedExactHash: cacheResult.matchedExactHash,
+      textSimilarity: cacheResult.textSimilarity,
+    });
+
+    const parsedData = await parseReceiptText(cleanedText, env, options);
+    await cache.storePrepared(preparedOcr, cacheContext.contextHash, parsedData);
+    console.log('receipt_fuzzy_cache_store', {
+      itemCount: preparedOcr.itemTextsSorted.length,
+      totalAmount: preparedOcr.totalAmount,
+    });
+    return parsedData;
+  }
+
+  return parseReceiptText(cleanedText, env, options);
 }

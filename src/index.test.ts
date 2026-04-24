@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { app } from './index';
 import { processReceiptScan } from './receipt-processing';
 import { normalizeRecurringIntervalUnit, advanceRecurringDate } from './recurring';
+import { buildReceiptOcrCacheContext, createReceiptOcrCache, extractReceiptCacheDocument } from './receipt-ocr-cache';
 import { isIncomingChangeNewer, shouldApplyDelete } from './sync-logic';
 
 type MockRecord = Record<string, any>;
@@ -17,6 +18,7 @@ const dbState = {
   receiptScanRateLimits: [] as MockRecord[],
   receiptImages: new Map<string, { body: Blob | ReadableStream; metadata?: Record<string, string> }>(),
   receiptQueueMessages: [] as Array<{ scanId: string }>,
+  receiptFuzzyCache: new Map<string, string>(),
 };
 
 const rawColumnOrderByTable: Record<string, Array<[string, string]>> = {
@@ -123,6 +125,7 @@ function resetDbState() {
   dbState.receiptScanRateLimits = [];
   dbState.receiptImages = new Map();
   dbState.receiptQueueMessages = [];
+  dbState.receiptFuzzyCache = new Map();
 }
 
 function getTableRecords(tableName: string) {
@@ -597,8 +600,32 @@ const MOCK_ENV = {
       dbState.receiptQueueMessages.push(message);
     },
   } as unknown as Queue<{ scanId: string }>,
+  RECEIPT_FUZZY_CACHE: {
+    get: async (key: string, type?: 'text' | 'json') => {
+      const stored = dbState.receiptFuzzyCache.get(key);
+      if (!stored) return null;
+      return type === 'json' ? JSON.parse(stored) : stored;
+    },
+    put: async (key: string, value: string) => {
+      dbState.receiptFuzzyCache.set(key, value);
+    },
+    list: async (options?: { prefix?: string; limit?: number }) => {
+      const prefix = options?.prefix ?? '';
+      const limit = options?.limit ?? 1000;
+      const keys = Array.from(dbState.receiptFuzzyCache.keys())
+        .filter((key) => key.startsWith(prefix))
+        .slice(0, limit)
+        .map((name) => ({ name }));
+      return {
+        keys,
+        cursor: '',
+        list_complete: true,
+      };
+    },
+  } as unknown as KVNamespace,
   GOOGLE_VISION_API_KEY: 'test-vision-key',
   GEMINI_API_KEY: 'test-gemini-key',
+  GEMINI_MODEL: 'gemini-test',
 };
 
 async function registerAndLogin(email: string) {
@@ -1628,6 +1655,212 @@ describe('Expense Tracker API', () => {
     expect(blockedResponse.status).toBe(404);
   });
 
+  test('receipt scan processing stores a fuzzy cache entry after a cache miss', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    const fetchCalls: Array<{ url: string; body: string }> = [];
+    console.log = () => undefined;
+    dbState.receiptScans.push(createQueuedReceiptScan('scan-cache-miss'));
+    dbState.receiptImages.set('receipt-scans/scan-cache-miss.jpg', {
+      body: new Blob([new Uint8Array([1, 2, 3, 4])]),
+    });
+
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const body = typeof init?.body === 'string' ? init.body : '';
+      fetchCalls.push({ url, body });
+
+      if (url.includes('vision.googleapis.com')) {
+        return jsonResponse({
+          responses: [
+            {
+              fullTextAnnotation: {
+                text: 'SUPERMERCADO XYZ\nB0N PAN 1230\nJUG0 NARANJA 2300\nTOTAL 3530',
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.includes('generativelanguage.googleapis.com')) {
+        return jsonResponse({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify({ amount: 35.3, merchant: 'Supermercado XYZ', warnings: [] }) }],
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      await processReceiptScan('scan-cache-miss', MOCK_ENV);
+
+      expect(dbState.receiptScans[0].status).toBe('completed');
+      expect(dbState.receiptFuzzyCache.size).toBeGreaterThan(0);
+      expect(fetchCalls).toHaveLength(2);
+      const geminiCall = fetchCalls.find((call) => call.url.includes('generativelanguage.googleapis.com'));
+      expect(geminiCall?.body).toContain('supermercado xyz');
+      expect(geminiCall?.body).toContain('b0n pan 1230');
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
+
+  test('receipt scan processing reuses a fuzzy cache hit without calling Gemini', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    const fetchUrls: string[] = [];
+    console.log = () => undefined;
+
+    const categories = [{ id: 'cat-1', name: 'Comida' }];
+    const cacheContext = await buildReceiptOcrCacheContext({
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+      categories,
+      geminiModel: MOCK_ENV.GEMINI_MODEL,
+    });
+    const cache = createReceiptOcrCache(MOCK_ENV.RECEIPT_FUZZY_CACHE!);
+    await cache.storePrepared(
+      extractReceiptCacheDocument('JUGO NARANJA 1200\nPAN INTEGRAL 2300\nTOTAL 3500'),
+      cacheContext.contextHash,
+      { amount: 35, merchant: 'Tienda Cacheada', warnings: [] },
+    );
+
+    dbState.receiptScans.push(createQueuedReceiptScan('scan-fuzzy-hit'));
+    dbState.receiptImages.set('receipt-scans/scan-fuzzy-hit.jpg', {
+      body: new Blob([new Uint8Array([5, 6, 7, 8])]),
+    });
+
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      fetchUrls.push(url);
+
+      if (url.includes('vision.googleapis.com')) {
+        return jsonResponse({
+          responses: [
+            {
+              fullTextAnnotation: {
+                text: 'JUGO NARANGA 1200\nPAN INTEGRAL 2300\nTOTAL 3500',
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Gemini should not be called on fuzzy hit: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      await processReceiptScan('scan-fuzzy-hit', MOCK_ENV);
+
+      expect(fetchUrls).toHaveLength(1);
+      expect(dbState.receiptScans[0].status).toBe('completed');
+      expect(dbState.receiptScans[0].parsedDataJson).toBe(JSON.stringify({
+        amount: 35,
+        merchant: 'Tienda Cacheada',
+        warnings: [],
+      }));
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
+
+  test('receipt scan processing falls back to Gemini when a cached payload is invalid and refreshes the entry', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    const fetchUrls: string[] = [];
+    console.log = () => undefined;
+
+    const categories = [{ id: 'cat-1', name: 'Comida' }];
+    const cacheContext = await buildReceiptOcrCacheContext({
+      locale: 'es',
+      currency: 'USD',
+      timezone: 'America/Bogota',
+      categories,
+      geminiModel: MOCK_ENV.GEMINI_MODEL,
+    });
+    const cache = createReceiptOcrCache(MOCK_ENV.RECEIPT_FUZZY_CACHE!);
+    await cache.storePrepared(
+      extractReceiptCacheDocument('CAFE 4100\nTOTAL 4100'),
+      cacheContext.contextHash,
+      { amount: 41, merchant: 'Viejo', warnings: [] },
+    );
+
+    const entryKey = Array.from(dbState.receiptFuzzyCache.keys()).find((key) => key.includes(':entry:'));
+    expect(entryKey).toBeTruthy();
+    const staleEntry = JSON.parse(dbState.receiptFuzzyCache.get(entryKey!)!);
+    staleEntry.payload = 'stale';
+    dbState.receiptFuzzyCache.set(entryKey!, JSON.stringify(staleEntry));
+
+    dbState.receiptScans.push(createQueuedReceiptScan('scan-stale-cache'));
+    dbState.receiptImages.set('receipt-scans/scan-stale-cache.jpg', {
+      body: new Blob([new Uint8Array([9, 9, 9, 9])]),
+    });
+
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      fetchUrls.push(url);
+
+      if (url.includes('vision.googleapis.com')) {
+        return jsonResponse({
+          responses: [
+            {
+              fullTextAnnotation: {
+                text: 'CAFE 4100\nTOTAL 4100',
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.includes('generativelanguage.googleapis.com')) {
+        return jsonResponse({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify({ amount: 41, merchant: 'Cafe Nuevo', warnings: [] }) }],
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      await processReceiptScan('scan-stale-cache', MOCK_ENV);
+
+      expect(fetchUrls).toHaveLength(2);
+      expect(dbState.receiptScans[0].status).toBe('completed');
+      expect(JSON.parse(dbState.receiptScans[0].parsedDataJson)).toMatchObject({
+        amount: 41,
+        merchant: 'Cafe Nuevo',
+        currency: 'USD',
+        warnings: [],
+      });
+
+      const refreshedEntry = JSON.parse(dbState.receiptFuzzyCache.get(entryKey!)!);
+      expect(refreshedEntry.payload).toMatchObject({
+        amount: 41,
+        merchant: 'Cafe Nuevo',
+        currency: 'USD',
+        warnings: [],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
+
   test('receipt scan processing marks missing images as failed', async () => {
     const originalError = console.error;
     console.error = () => undefined;
@@ -1657,7 +1890,117 @@ describe('Expense Tracker API', () => {
       console.error = originalError;
     }
   });
+
+  test('receipt scan processing does not write fuzzy cache entries when OCR fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalError = console.error;
+    console.error = () => undefined;
+    dbState.receiptScans.push(createQueuedReceiptScan('scan-ocr-failure'));
+    dbState.receiptImages.set('receipt-scans/scan-ocr-failure.jpg', {
+      body: new Blob([new Uint8Array([1, 3, 5, 7])]),
+    });
+
+    globalThis.fetch = (async () => jsonResponse({
+      responses: [{ error: { message: 'vision failed' } }],
+    }, 500)) as unknown as typeof fetch;
+
+    try {
+      await processReceiptScan('scan-ocr-failure', MOCK_ENV);
+
+      expect(dbState.receiptScans[0].status).toBe('failed');
+      expect(dbState.receiptFuzzyCache.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalError;
+    }
+  });
+
+  test('receipt scan processing still works without the fuzzy cache binding', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    console.log = () => undefined;
+    dbState.receiptScans.push(createQueuedReceiptScan('scan-no-kv'));
+    dbState.receiptImages.set('receipt-scans/scan-no-kv.jpg', {
+      body: new Blob([new Uint8Array([2, 4, 6, 8])]),
+    });
+
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+
+      if (url.includes('vision.googleapis.com')) {
+        return jsonResponse({
+          responses: [
+            {
+              fullTextAnnotation: {
+                text: 'CAFE 4100\nTOTAL 4100',
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.includes('generativelanguage.googleapis.com')) {
+        return jsonResponse({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify({ amount: 41, merchant: 'Cafe sin kv', warnings: [] }) }],
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const envWithoutKv = {
+      ...MOCK_ENV,
+      RECEIPT_FUZZY_CACHE: undefined,
+    };
+
+    try {
+      await processReceiptScan('scan-no-kv', envWithoutKv);
+
+      expect(dbState.receiptScans[0].status).toBe('completed');
+      expect(JSON.parse(dbState.receiptScans[0].parsedDataJson)).toMatchObject({
+        amount: 41,
+        merchant: 'Cafe sin kv',
+        currency: 'USD',
+      });
+      expect(dbState.receiptFuzzyCache.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
 });
+
+function createQueuedReceiptScan(scanId: string) {
+  return {
+    scanId,
+    clientScanId: crypto.randomUUID(),
+    userId: 'user-1',
+    status: 'queued',
+    locale: 'es',
+    currency: 'USD',
+    timezone: 'America/Bogota',
+    categoriesJson: JSON.stringify([{ id: 'cat-1', name: 'Comida' }]),
+    imageObjectKey: `receipt-scans/${scanId}.jpg`,
+    parsedDataJson: null,
+    failureMessage: null,
+    createdAt: 1,
+    updatedAt: 1,
+    completedAt: null,
+  };
+}
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 function createReceiptScanForm(
   options: {

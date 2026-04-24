@@ -16,6 +16,14 @@
 			"bucket_name": "expense-tracker-receipt-images"
 		}
 	],
+	// Optional: enables OCR-aware fuzzy caching between Vision OCR and Gemini.
+	// Provision a KV namespace and uncomment before deploy.
+	// "kv_namespaces": [
+	// 	{
+	// 		"binding": "RECEIPT_FUZZY_CACHE",
+	// 		"id": "your-kv-namespace-id"
+	// 	}
+	// ],
 	"d1_databases": [
 		{
 			"binding": "DB",

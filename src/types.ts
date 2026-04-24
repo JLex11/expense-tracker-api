@@ -4,6 +4,7 @@ export interface CloudflareBindings {
   CORS_ORIGIN?: string;
   RECEIPT_IMAGES: R2Bucket;
   RECEIPT_SCAN_QUEUE: Queue<ReceiptScanQueueMessage>;
+  RECEIPT_FUZZY_CACHE?: KVNamespace;
   GOOGLE_VISION_API_KEY: string;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;

@@ -48,6 +48,7 @@ Optional:
 
 - `CORS_ORIGIN`: comma-separated allowlist such as `http://localhost:3000,http://localhost:5173`
 - `GEMINI_MODEL`: defaults to `gemini-2.5-flash-lite`
+- `RECEIPT_FUZZY_CACHE`: optional Cloudflare KV binding for OCR-aware fuzzy cache between Vision OCR and Gemini. If omitted, receipt parsing still works and simply skips the fuzzy cache layer.
 
 ### Run the Worker
 
@@ -88,6 +89,7 @@ Provision these Cloudflare resources before production deploy:
 
 - R2 bucket: `expense-tracker-receipt-images`
 - Queue: `receipt-scan-jobs`
+- KV namespace for `RECEIPT_FUZZY_CACHE` if you want OCR-aware fuzzy cache reuse across scans
 
 ## Testing
 
@@ -128,6 +130,7 @@ bun run typecheck
 - `GET /api/profile` excludes soft-deleted users.
 - Recurring rules accept both documented interval values (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`) and legacy aliases (`DAY`, `WEEK`, `MONTH`, `YEAR`).
 - `POST /api/receipt-scans` deduplicates exact JPEG uploads by exact normalized parse context, including normalized category ids/names. A completed cache hit returns `201` with a new `scanId`, while an in-flight match for the same user returns `200` with the existing `scanId`.
+- Receipt processing can optionally use a second cache layer between Google Vision OCR and Gemini. It builds an OCR-aware fingerprint from normalized item text, exact amounts, and total, then reuses prior parsed payloads only when numeric signatures match exactly and fuzzy text similarity clears the threshold.
 
 ## Documentation
 
